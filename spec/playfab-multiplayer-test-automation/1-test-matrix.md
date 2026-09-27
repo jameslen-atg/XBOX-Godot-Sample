@@ -88,7 +88,7 @@ These tables anchor the `state_transitions` scenarios. Each cell is a transition
 | From | Trigger | To | Observable event |
 | --- | --- | --- | --- |
 | `none` | `create_match_ticket_async(host, queue)` | `waiting_for_players` | `match.status_changed = waiting_for_players` on host |
-| `waiting_for_players` | second player ticket created in same queue | `waiting_for_match` → `matched` | `match.status_changed = matched` on both |
+| `waiting_for_players` | second player ticket created in same queue | `waiting_for_match` → `matched` | `match.ticket_completed = matched` on both |
 | `matched` | host calls `cancel_match_ticket_async` | `cancelled` (idempotent if already terminal) | `match.status_changed = cancelled` on host |
 | `waiting_for_players` | host calls `cancel_match_ticket_async` | `cancelled` | `match.status_changed = cancelled` on host |
 | `waiting_for_players` | ticket `timeout_seconds` elapses | `failed` w/ timeout cause | `match.status_changed = failed` on host |
