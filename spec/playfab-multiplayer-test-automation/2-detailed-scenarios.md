@@ -101,8 +101,10 @@ Scenarios normally call `await client.send("sign_in", {}, 60_000)` with empty pa
 | `lobby.properties_updated` | `handle, lobby_id, properties` | every member |
 | `lobby.owner_changed` | `handle, lobby_id, old_owner, new_owner` | every surviving member |
 | `lobby.disconnected` | `handle, lobby_id, reason` | every member |
-| `match.status_changed` | `handle, ticket_id, status` | the ticket owner, for non-terminal statuses |
-| `match.ticket_completed` | `handle, ticket_id, status, match, result` | the ticket owner, once, when the ticket matches |
+| `match.status_changed` | `handle, kind, status, match_id, arranged_lobby_connection_string, ticket, result` | the ticket owner, for non-terminal statuses |
+| `match.ticket_completed` | `handle, kind, status, match_id, arranged_lobby_connection_string, ticket, result` | the ticket owner, once, when the ticket matches |
+| `match.ticket_failed` | `handle, kind, status, match_id, arranged_lobby_connection_string, ticket, result` | the ticket owner, once, when the ticket fails |
+| `match.ticket_cancelled` | `handle, ticket, kind?, status?, match_id?, arranged_lobby_connection_string?, result?` | the ticket owner, when the ticket is cancelled |
 | `party.network_ready` | `handle, network_descriptor, local_peer_id` | every connecting client |
 | `party.peer_connected` | `handle, peer_id, entity_key` | every existing peer |
 | `party.peer_disconnected` | `handle, peer_id, entity_key, reason` | every surviving peer |
@@ -110,6 +112,8 @@ Scenarios normally call `await client.send("sign_in", {}, 60_000)` with empty pa
 | `party.rpc.ping_received` | `handle, sender_peer_id, payload, correlation_id` | receiver of `party_send_rpc_ping` |
 | `party.rpc.pong_received` | `handle, sender_peer_id, payload, correlation_id` | original ping sender, after receiver returns pong |
 | `party.chat.text_message_received` | `handle, sender_peer_id, text` | every recipient |
+
+Ticket IDs are available as `ticket.ticket_id`. Successful cancellation commands also emit `match.ticket_cancelled` with only `handle` and `ticket`.
 
 ## Lobby — P0 detailed scenarios
 
@@ -292,7 +296,7 @@ Scenarios normally call `await client.send("sign_in", {}, 60_000)` with empty pa
 - **Steps**:
   1. `send(host, create_match_ticket, { as: "ticket", queue_name: orch.env("PLAYFAB_MULTIPLAYER_MATCH_QUEUE"), timeout_seconds: 60, attributes: { skill: 1 } })`.
   2. Assert `response.result.ticket.ticket_id != ""`.
-  3. Subscribe `cancelled = expect_event(host, match.status_changed, { handle: "ticket", status: "cancelled" })`.
+  3. Subscribe `cancelled = expect_event(host, match.ticket_cancelled, { handle: "ticket" })`.
   4. `send(host, cancel_match_ticket, { ticket_id: response.result.ticket.ticket_id })`.
   5. `await cancelled.wait(15000)`; assert not timed out.
 - **Notes**: Port of legacy `match ticket create and cancel`.
@@ -302,12 +306,12 @@ Scenarios normally call `await client.send("sign_in", {}, 60_000)` with empty pa
 - **Roles**: host, guest
 - **Goal**: Both clients in the same queue both reach `matched`.
 - **Steps**:
-  1. `host_matched = expect_event(host, match.ticket_completed, { handle: "host_ticket", status: "matched" })`.
-  2. `guest_matched = expect_event(guest, match.ticket_completed, { handle: "guest_ticket", status: "matched" })`.
+  1. `host_matched = expect_event(host, match.ticket_completed, { handle: "host_ticket" })`.
+  2. `guest_matched = expect_event(guest, match.ticket_completed, { handle: "guest_ticket" })`.
   3. `send(host, create_match_ticket, { as: "host_ticket", queue_name: ..., timeout_seconds: 60 })`.
   4. `send(guest, create_match_ticket, { as: "guest_ticket", queue_name: ..., timeout_seconds: 60 })`.
   5. `await host_matched.wait(60000)`; `await guest_matched.wait(60000)`.
-  6. Assert both events have a `match.id` matching each other.
+  6. Assert both events' payloads contain equal, non-empty `match_id` values.
 - **Notes**: Port of legacy `two-player match completion`. Subscribe before create — once a queue has enough players, status can transition to matched before the second `create_match_ticket` returns.
 
 ### `match.ticket.completion.metadata_present`
