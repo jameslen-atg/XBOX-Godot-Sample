@@ -66,7 +66,7 @@ Pass `--remote <name>` if so.
    ```
 
    Each run gets a status of `quality-pass`, `quality-fail`,
-   `pending-human-review`, `invalid-report`, or `infra-failure`, which is
+   `pending-human-review`, `invalid-report`, or `infra-or-model-failure`, which is
    written to `result.json`.
 
 ## Running a case in Actions

@@ -175,6 +175,12 @@ function selectPriorComments(comments, triggerCommentId, botLogin) {
     .filter((comment) => !isTriageReportComment(comment, botLogin) && !isTriageCommand(comment.body));
 }
 
+function countLines(text) {
+  if (!text) return 0;
+  const count = text.split('\n').length;
+  return text.endsWith('\n') ? count - 1 : count;
+}
+
 function computeDigest(issue, priorComments) {
   const canonical = JSON.stringify({
     title: issue.title || '',
@@ -405,9 +411,7 @@ function validateCitation(root, finding) {
 
   const content = fs.readFileSync(resolved);
   if (content.subarray(0, 8192).includes(0)) fail('binary files cannot be cited');
-  const text = content.toString('utf8');
-  let lineCount = text.split('\n').length;
-  if (text.endsWith('\n')) lineCount -= 1;
+  const lineCount = countLines(content.toString('utf8'));
 
   const { start_line: start, end_line: end } = finding;
   if (start < 1 || end < start) fail(`invalid line range ${start}-${end}`);
@@ -622,6 +626,7 @@ module.exports = {
   TriageError,
   buildContextMarkdown,
   computeDigest,
+  countLines,
   escapeMarkdown,
   evaluateEligibility,
   fenceFor,

@@ -4,5 +4,5 @@
   "expectations_file": "expectations.json",
   "target_sha": "f6c16289e939729b474e9009c5dd1ec1d23015ba",
   "sha_justification": "Latest main when the issue was filed; the fix landed later in #189 (b1b4e0b), so pinning earlier keeps the request open.",
-  "fixture_digest": "5edd94423bdc832d0a5e4a7bfc6fc99790f1d292b04f2b28448e49ffe446f5b7"
+  "fixture_digest": "19a24bc6f17830993933ac003da828787a83868f6835dea8d038b984a0d3f0ce"
 }

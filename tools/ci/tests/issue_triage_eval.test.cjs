@@ -132,6 +132,25 @@ test('the suite passes only when every case passed', () => {
   assert.equal(evalHarness.suiteVerdict([{ case_id: 'a', status: STATUS.QUALITY_PASS }], ['a']).pass, true);
 });
 
+test('fixtureDigest covers every model-visible fixture field and ignores key order', () => {
+  const issue = issueFixture({
+    user: { login: 'reporter' },
+    created_at: '2026-01-01T00:00:00Z',
+    comments: [{ id: 1, user: { login: 'u', type: 'User' }, author_association: 'NONE', body: 'hi', created_at: '2026-01-02T00:00:00Z' }],
+  });
+  const digest = evalHarness.fixtureDigest(issue);
+  const reordered = Object.fromEntries(Object.entries(issue).reverse());
+  assert.equal(evalHarness.fixtureDigest(reordered), digest);
+  const variants = [
+    { ...issue, user: { login: 'someone-else' } },
+    { ...issue, created_at: '2026-01-05T00:00:00Z' },
+    { ...issue, comments: [{ ...issue.comments[0], user: { login: 'other', type: 'User' } }] },
+    { ...issue, comments: [{ ...issue.comments[0], author_association: 'MEMBER' }] },
+    { ...issue, comments: [{ ...issue.comments[0], created_at: '2026-01-03T00:00:00Z' }] },
+  ];
+  for (const variant of variants) assert.notEqual(evalHarness.fixtureDigest(variant), digest);
+});
+
 test('checkCaseShape accepts a well-formed case', () => {
   const issue = issueFixture();
   assert.deepEqual(evalHarness.checkCaseShape('case-a', caseFixture(issue), issue, expectationsFixture()), []);

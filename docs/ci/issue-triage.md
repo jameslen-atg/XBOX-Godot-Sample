@@ -2,8 +2,13 @@
 
 A maintainer can ask for an AI first-pass evaluation of an issue by commenting
 `/triage` on it. An agentic workflow reads the issue, analyzes it against the
-default-branch code, and posts one comment that summarizes the issue, points at
-the relevant code, and lists open questions and suggested next steps.
+default-branch code, and produces one report that summarizes the issue, points
+at the relevant code, and lists open questions and suggested next steps.
+
+> **Current rollout: staged.** The workflow ships with `TRIAGE_MODE: staged`, so
+> the report appears only as a preview in the workflow run's job summary and no
+> issue comment is posted. Posting is enabled later; see
+> [Rollout](#rollout-staged-then-posting).
 
 The report is a **starting point for a human**, not a decision. It is static
 analysis only: the agent never builds, runs, or reproduces anything, and it

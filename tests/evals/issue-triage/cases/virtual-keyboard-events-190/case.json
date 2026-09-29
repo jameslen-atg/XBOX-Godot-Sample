@@ -4,5 +4,5 @@
   "expectations_file": "expectations.json",
   "target_sha": "55735f7811a324c10c951ceb8a2bf045f08c6753",
   "sha_justification": "Merge of #187, which added virtual keyboard support; latest main when the issue was filed.",
-  "fixture_digest": "4364353fb9b6e5ec118386825ffae0a7d5b2a05dd3d5b23e1dc4718a85792c9c"
+  "fixture_digest": "1a64c5dd5e75bba48e52e4ecde166d06871f5ad6f4e685473b894c7db796a0ec"
 }

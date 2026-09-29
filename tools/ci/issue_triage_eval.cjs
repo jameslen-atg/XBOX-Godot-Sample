@@ -67,8 +67,18 @@ function listCaseIds(casesRoot = CASES_ROOT) {
     .sort();
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).filter((key) => value[key] !== undefined).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+// Hashes the whole frozen fixture so any field rendered into model input invalidates the digest.
 function fixtureDigest(issue) {
-  return triage.computeDigest(issue, issue.comments || []);
+  return crypto.createHash('sha256').update(canonicalJson(issue)).digest('hex');
 }
 
 function checkCaseShape(id, caseDef, issue, expectations) {
@@ -157,9 +167,7 @@ function fileLineCount(sha, relPath) {
   } catch {
     return null;
   }
-  let count = text.split('\n').length;
-  if (text.endsWith('\n')) count -= 1;
-  return count;
+  return triage.countLines(text);
 }
 
 function checkEvidenceAtCommit(sha, expectations, lineCounter = fileLineCount) {

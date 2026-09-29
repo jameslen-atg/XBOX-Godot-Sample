@@ -398,6 +398,20 @@ for (const [name, finding, pattern] of badCitations) {
   });
 }
 
+test('validateCitation rejects a citation into an empty file', () => {
+  const root = makeRepoFixture();
+  fs.writeFileSync(path.join(root, 'empty.txt'), '');
+  assert.throws(() => triage.validateCitation(root, { path: 'empty.txt', start_line: 1, end_line: 1 }), /past the end of the file \(0 lines\)/);
+});
+
+test('countLines treats empty text as zero lines and ignores a trailing newline', () => {
+  assert.equal(triage.countLines(''), 0);
+  assert.equal(triage.countLines('a'), 1);
+  assert.equal(triage.countLines('a\n'), 1);
+  assert.equal(triage.countLines('a\nb'), 2);
+  assert.equal(triage.countLines('\n'), 1);
+});
+
 test('validateCitation rejects symlinked files and directories', (t) => {
   const root = makeRepoFixture();
   const outside = tempDir();

@@ -4,5 +4,5 @@
   "expectations_file": "expectations.json",
   "target_sha": "f6c16289e939729b474e9009c5dd1ec1d23015ba",
   "sha_justification": "The issue reports `f6c1628`; the test file is unchanged there.",
-  "fixture_digest": "315d11388071c198f91ad506809e562bbcb29adfacb43256611209fedae7fb27"
+  "fixture_digest": "909b46168b293a8ee91e1aa91c9a41f962ddb8958a045663609fdca3111916fb"
 }
