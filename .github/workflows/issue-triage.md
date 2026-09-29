@@ -117,9 +117,9 @@ safe-outputs:
         - name: Publish triage report
           uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
           env:
-            # Staged rollout: `staged` renders the report to the job summary only.
-            # Change to `post` once the pilot is verified (docs/ci/issue-triage.md).
-            TRIAGE_MODE: staged
+            # `post` comments on the issue. Set to `staged` to render the report to
+            # the job summary only (docs/ci/issue-triage.md).
+            TRIAGE_MODE: post
             TRIAGE_CONTEXT_PATH: ${{ runner.temp }}/issue-triage-context/context.json
           with:
             script: |

@@ -2,13 +2,10 @@
 
 A maintainer can ask for an AI first-pass evaluation of an issue by commenting
 `/triage` on it. An agentic workflow reads the issue, analyzes it against the
-default-branch code, and produces one report that summarizes the issue, points
-at the relevant code, and lists open questions and suggested next steps.
-
-> **Current rollout: staged.** The workflow ships with `TRIAGE_MODE: staged`, so
-> the report appears only as a preview in the workflow run's job summary and no
-> issue comment is posted. Posting is enabled later; see
-> [Rollout](#rollout-staged-then-posting).
+default-branch code, and posts one comment that summarizes the issue, points at
+the relevant code, and lists open questions and suggested next steps. See
+[Posting and staged mode](#posting-and-staged-mode) to switch to a
+job-summary-only preview.
 
 The report is a **starting point for a human**, not a decision. It is static
 analysis only: the agent never builds, runs, or reproduces anything, and it
@@ -117,24 +114,21 @@ Issues labeled as security-sensitive are never triaged. If the agent itself
 concludes an issue looks security-sensitive, the run fails and nothing is
 posted. A maintainer should then follow the `SECURITY.md` process by hand.
 
-## Rollout: staged, then posting
+## Posting and staged mode
 
-The workflow ships in **staged** mode. The publisher renders the report into
-the run's job summary and never comments on the issue. To start posting:
+The workflow runs with `TRIAGE_MODE: post` on the "Publish triage report" step
+of `.github/workflows/issue-triage.md`, so each valid report is posted as an
+issue comment. Any value other than exactly `post` (for example `staged`)
+renders the report into the run's job summary and never comments on the issue.
 
-1. Run a handful of pilot requests (see the checklist below) and review each
-   rendered summary.
-2. In `.github/workflows/issue-triage.md`, change `TRIAGE_MODE: staged` to
-   `TRIAGE_MODE: post` on the "Publish triage report" step. Any value other than
-   exactly `post` is treated as staged.
-3. Recompile and commit both files:
+To pause posting, set the value to `staged`, then recompile and commit both
+files:
 
-   ```powershell
-   gh aw compile issue-triage --validate --strict
-   ```
+```powershell
+gh aw compile issue-triage --validate --strict
+```
 
-To pause posting later, set the value back to `staged` and recompile. To turn
-the workflow off entirely, disable **Issue Triage** in the Actions tab.
+To turn the workflow off entirely, disable **Issue Triage** in the Actions tab.
 
 ## Prerequisites
 
@@ -181,10 +175,11 @@ necessarily a good one; only a scored run can be a quality pass. See
 
 ## Pilot checklist
 
-Before you switch to `post`, confirm the following in staged runs:
+Confirm the following after deploying or changing the workflow:
 
-- [ ] A `/triage` from a maintainer produces a job-summary report with working
-      permalinks and sensible findings.
+- [ ] A `/triage` from a maintainer posts one report comment with working
+      permalinks and sensible findings. Re-running that run does not post a
+      duplicate; a new `/triage` comment posts a new report.
 - [ ] `/triage` from a non-collaborator, on a pull request, on a closed issue,
       on a JIT request, and on a security-labeled issue is skipped, with the
       reason in the run's notice
