@@ -1,0 +1,8 @@
+{
+  "id": "virtual-keyboard-events-190",
+  "issue_file": "issue.json",
+  "expectations_file": "expectations.json",
+  "target_sha": "55735f7811a324c10c951ceb8a2bf045f08c6753",
+  "sha_justification": "Merge of #187, which added virtual keyboard support; latest main when the issue was filed.",
+  "fixture_digest": "4364353fb9b6e5ec118386825ffae0a7d5b2a05dd3d5b23e1dc4718a85792c9c"
+}

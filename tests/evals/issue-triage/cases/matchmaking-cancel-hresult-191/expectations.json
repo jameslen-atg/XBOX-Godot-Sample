@@ -1,0 +1,97 @@
+{
+  "case_id": "matchmaking-cancel-hresult-191",
+  "acceptable_kinds": [
+    "bug"
+  ],
+  "expected_assessment": "Both reported problems are plausible from the code: cancel_async only settles on CANCELLED/FAILED, so a ticket that reaches Matched first leaves the cancel pending; and the status-change FAILED path synthesizes E_FAIL instead of the native HRESULT.",
+  "evidence": [
+    {
+      "id": "status-change-synthesized-efail",
+      "required": true,
+      "why": "TicketStatusChanged builds the FAILED result with E_FAIL, losing the native HRESULT.",
+      "locations": [
+        {
+          "path": "addons/godot_playfab/src/playfab_multiplayer.cpp",
+          "start_line": 3466,
+          "end_line": 3481
+        }
+      ]
+    },
+    {
+      "id": "completed-cancel-only-on-cancelled-or-failed",
+      "required": true,
+      "why": "TicketCompleted settles the pending cancel only for CANCELLED/FAILED; a Matched completion leaves it pending.",
+      "locations": [
+        {
+          "path": "addons/godot_playfab/src/playfab_multiplayer.cpp",
+          "start_line": 3498,
+          "end_line": 3519
+        }
+      ]
+    },
+    {
+      "id": "terminal-ticket-destroyed",
+      "required": false,
+      "why": "Terminal tickets are destroyed after the batch, so the pending cancel can never settle later.",
+      "locations": [
+        {
+          "path": "addons/godot_playfab/src/playfab_multiplayer.cpp",
+          "start_line": 3530,
+          "end_line": 3536
+        }
+      ]
+    },
+    {
+      "id": "create-failure-efail",
+      "required": false,
+      "why": "Create failure also reports E_FAIL.",
+      "locations": [
+        {
+          "path": "addons/godot_playfab/src/playfab_multiplayer.cpp",
+          "start_line": 1926,
+          "end_line": 1929
+        }
+      ]
+    },
+    {
+      "id": "cancel-api",
+      "required": false,
+      "why": "Public cancel entry point and documentation.",
+      "locations": [
+        {
+          "path": "addons/godot_playfab/src/playfab_multiplayer.cpp",
+          "start_line": 1700,
+          "end_line": 1715
+        },
+        {
+          "path": "addons/godot_playfab/src/playfab_multiplayer.cpp",
+          "start_line": 2915,
+          "end_line": 2960
+        },
+        {
+          "path": "addons/godot_playfab/doc_classes/PlayFabMatchTicket.xml",
+          "start_line": 20,
+          "end_line": 30
+        }
+      ]
+    }
+  ],
+  "key_facts": [
+    "A cancel that races with a Matched/Completed ticket never settles because only CANCELLED/FAILED complete the cancel operation.",
+    "The TicketStatusChanged FAILED path uses E_FAIL rather than a native HRESULT.",
+    "The ticket is destroyed after the batch, so there is no later event to settle the cancel."
+  ],
+  "acceptable_uncertainty": [
+    "Whether the native status-change struct exposes an HRESULT to propagate.",
+    "Exact fix shape (settle cancel with success/already-matched vs error)."
+  ],
+  "relevant_questions": [
+    "Which native result should surface when status changes to Failed without a completion HRESULT?",
+    "Expected cancel_async result when the ticket already matched."
+  ],
+  "avoid": [
+    "Claiming the bug was reproduced or tests were run.",
+    "Claiming cancel_async is not implemented.",
+    "Citing code from a later fix commit."
+  ]
+}

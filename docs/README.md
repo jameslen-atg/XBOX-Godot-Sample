@@ -137,3 +137,8 @@ docs/
 ## Troubleshooting
 
 - [**Troubleshooting**](troubleshooting.md) — common build, runtime, and test issues
+
+## Repository automation
+
+- [**Issue triage (`/triage`)**](ci/issue-triage.md) — maintainer-triggered AI
+  first-pass evaluation of an issue against the code, rollout, and pilot checklist
