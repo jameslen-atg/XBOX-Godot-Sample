@@ -601,3 +601,4 @@ against the release's `SHA512-SUMS.txt`) and add it to the `sha512` map.
   only reachable on a self-hosted Win11 runner or a developer machine.
 - **Fuzz infra dependency.** The `fuzz-replay` job assumes the fuzz harness /
   `fuzz` preset (originally on `infra/fuzz-testing`) is present on `main`.
+<!-- scoped-gates probe: docs -->
