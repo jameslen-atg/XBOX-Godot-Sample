@@ -69,3 +69,4 @@ static func _print_summary(result: Dictionary) -> void:
 	var duration: int = int(result.get("duration_ms", 0))
 	var message: String = str(result.get("message", ""))
 	print("[editortools] %s %s in %dms: %s" % [verb, status, duration, message])
+# scoped-gates probe: editortools
