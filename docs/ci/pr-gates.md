@@ -349,7 +349,10 @@ has moved to a VS2026 image with no VS2022 instance, so the preset can't
 configure there.
 
 To add a regression input, drop the bytes into the matching
-`tests/cpp/fuzz/corpus/<target>/` directory and commit it.
+`tests/cpp/fuzz/corpus/<target>/` directory and commit it. A corpus directory
+or `tests/cpp/fuzz/*.cpp` file that doesn't match a known target is treated as an
+unknown path: it selects the full gate set and fails the `ci-lint` route-coverage
+test until the target is registered in `tools/ci/pr_gate_scope.cjs`.
 
 On scoped PRs the job builds and replays only the targets the selector picked
 (changed harness, corpus, or production source the target compiles):

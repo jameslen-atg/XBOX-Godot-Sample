@@ -171,6 +171,18 @@ test('C++ test inputs select only doctest/fuzz work', () => {
   assert.deepEqual(cm.fuzz_targets, scope.FUZZ_TARGETS);
 });
 
+test('unknown fuzz corpus dirs and sources fall back to full', () => {
+  for (const p of [
+    'tests/cpp/fuzz/corpus/playfab_fuzz_party_codex/seed1',
+    'tests/cpp/fuzz/corpus/README.md',
+    'tests/cpp/fuzz/fuzz_not_a_real_target.cpp',
+  ]) {
+    const r = classify(p);
+    assert.equal(r.full, true, p);
+    assert.deepEqual(r.fallback, [p], p);
+  }
+});
+
 test('mixed fuzz targets stay mixed', () => {
   const r = classify(
     'tests/cpp/fuzz/corpus/playfab_fuzz_key_lookup/a',

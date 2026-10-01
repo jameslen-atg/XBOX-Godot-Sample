@@ -456,20 +456,19 @@ const RULES = [
   {
     name: 'fuzz corpus',
     kind: 'specific',
-    test: pre('tests/cpp/fuzz/corpus/'),
-    apply: (sel, p) => {
-      const target = p.split('/')[4];
-      if (FUZZ_TARGETS.includes(target)) sel.fuzz.add(target);
+    // Only known target dirs match; anything else falls through to the full fallback.
+    test: (p) => {
+      const m = /^tests\/cpp\/fuzz\/corpus\/([^/]+)\/./.exec(p);
+      return !!m && FUZZ_TARGETS.includes(m[1]);
     },
+    apply: (sel, p) => sel.fuzz.add(p.split('/')[4]),
   },
   {
     name: 'fuzz target source',
     kind: 'specific',
-    test: re(/^tests\/cpp\/fuzz\/[^/]+\.cpp$/),
-    apply: (sel, p) => {
-      const target = fuzzSourceTarget(path.posix.basename(p));
-      if (target) sel.fuzz.add(target);
-    },
+    test: (p) =>
+      /^tests\/cpp\/fuzz\/[^/]+\.cpp$/.test(p) && fuzzSourceTarget(path.posix.basename(p)) !== null,
+    apply: (sel, p) => sel.fuzz.add(fuzzSourceTarget(path.posix.basename(p))),
   },
 
   // Issue triage: covered by the Issue Triage Checks workflow.
