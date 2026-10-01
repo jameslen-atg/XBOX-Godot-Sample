@@ -94,3 +94,4 @@ void GameInputActionMap::clear() {
 }
 
 } // namespace godot
+// scoped-gates probe: gameinput
