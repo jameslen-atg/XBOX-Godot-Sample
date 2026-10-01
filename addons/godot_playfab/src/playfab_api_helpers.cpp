@@ -31,3 +31,4 @@ String variant_to_json_string(const Variant &p_value) {
 } // namespace playfab_api
 } // namespace godot
 
+// scoped-gates probe: playfab
