@@ -287,3 +287,4 @@ GDExtensionBool GDE_EXPORT gdk_addon_init(
 }
 
 } // extern "C"
+// scoped-gates probe: gdk
