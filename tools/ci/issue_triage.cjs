@@ -323,7 +323,10 @@ function normalizeDocUrl(raw) {
   }
   if (url.protocol !== 'https:') throw new Error('must use https');
   if (url.username || url.password) throw new Error('must not contain credentials');
-  if (url.port) throw new Error('must not specify a port');
+  // URL drops default ports (":443") and empty ports (":"), so check the raw authority too.
+  const authority = /^https:\/\/([^/?#\\]*)/i.exec(raw);
+  if (!authority) throw new Error('must be an absolute https URL');
+  if (url.port || authority[1].includes(':')) throw new Error('must not specify a port');
   if (!DOC_HOSTS.includes(url.hostname)) throw new Error(`host must be one of: ${DOC_HOSTS.join(', ')}`);
   if (url.search) throw new Error('must not contain a query string');
   const rest = url.href.slice(`https://${url.hostname}`.length);
