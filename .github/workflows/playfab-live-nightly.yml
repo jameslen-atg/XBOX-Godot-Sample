@@ -268,3 +268,4 @@ jobs:
           name: playfab-live-run-summary-gdk-${{ matrix.gdk.edition }}
           path: build/test-results/run-summary.*
           if-no-files-found: warn
+# scoped-gates probe: workflow-only
