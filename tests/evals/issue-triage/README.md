@@ -59,7 +59,11 @@ Pass `--remote <name>` if so.
    `critical_failure` (`null` or `{ "reason": "..." }`).
 
 5. Score it. Pass several `--run` options to get a suite verdict once every
-   case is covered.
+   case is covered. `score` rejects a run whose `target_sha` or
+   `fixture_digest` no longer matches the checked-in case; re-run `prepare`
+   after changing a case. It exits 0 only when every case has a
+   `quality-pass` run, so scoring a single case exits 1 even when that case
+   passes; read the per-run status for single-case checks.
 
    ```powershell
    node tools\ci\issue_triage_eval.cjs score --run $env:TEMP\tri-eval\<case-id>

@@ -295,3 +295,68 @@ test('parseArgs collects repeated --case/--run and rejects missing values', () =
   assert.deepEqual(args, { _: ['score'], run: ['a', 'b'], fetch: false });
   assert.throws(() => evalHarness.parseArgs(['prepare', '--out']), /needs a value/);
 });
+
+function writeScorableRun({ runOverrides = {} } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'triage-eval-score-'));
+  const casesRoot = path.join(root, 'cases');
+  const caseDir = path.join(casesRoot, 'case-a');
+  fs.mkdirSync(caseDir, { recursive: true });
+  const issue = issueFixture();
+  const caseDef = caseFixture(issue);
+  fs.writeFileSync(path.join(caseDir, 'issue.json'), JSON.stringify(issue));
+  fs.writeFileSync(path.join(caseDir, 'expectations.json'), JSON.stringify(expectationsFixture()));
+  fs.writeFileSync(path.join(caseDir, 'case.json'), JSON.stringify(caseDef));
+
+  const runDir = path.join(root, 'run');
+  fs.mkdirSync(path.join(runDir, 'source', 'src'), { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'source', 'src', 'a.cpp'), 'one\ntwo\nthree\nfour\n');
+  fs.writeFileSync(path.join(runDir, 'report.json'), JSON.stringify(report()));
+  fs.writeFileSync(path.join(runDir, 'scorecard.json'), JSON.stringify(scorecard({})));
+  const run = { case_id: 'case-a', target_sha: SHA, fixture_digest: caseDef.fixture_digest, outcome: 'completed', ...runOverrides };
+  fs.writeFileSync(path.join(runDir, 'run.json'), JSON.stringify(run));
+  return { root, casesRoot, runDir };
+}
+
+test('scoreRun scores a run that matches the current case', () => {
+  const { root, casesRoot, runDir } = writeScorableRun();
+  try {
+    assert.equal(evalHarness.scoreRun(runDir, { casesRoot, fetch: false }).status, STATUS.QUALITY_PASS);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+const staleRuns = [
+  ['target_sha', { target_sha: 'c'.repeat(40) }, /target_sha .* does not match case/],
+  ['fixture_digest', { fixture_digest: 'd'.repeat(64) }, /fixture_digest .* does not match current fixture/],
+];
+
+for (const [name, runOverrides, pattern] of staleRuns) {
+  test(`scoreRun rejects a stale run artifact: ${name}`, () => {
+    const { root, casesRoot, runDir } = writeScorableRun({ runOverrides });
+    try {
+      assert.throws(() => evalHarness.scoreRun(runDir, { casesRoot, fetch: false }), (error) => error instanceof evalHarness.EvalError && pattern.test(error.message));
+      assert.equal(fs.existsSync(path.join(runDir, 'result.json')), false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test('score exits non-zero when the suite is incomplete even if every supplied run passes', () => {
+  const { root, runDir } = writeScorableRun();
+  try {
+    const run = JSON.parse(fs.readFileSync(path.join(runDir, 'run.json'), 'utf8'));
+    const ids = evalHarness.listCaseIds();
+    const realCase = evalHarness.loadCase(ids[0]);
+    Object.assign(run, { case_id: ids[0], target_sha: realCase.caseDef.target_sha, fixture_digest: realCase.caseDef.fixture_digest });
+    fs.writeFileSync(path.join(runDir, 'run.json'), JSON.stringify(run));
+    fs.writeFileSync(path.join(runDir, 'scorecard.json'), JSON.stringify(scorecard({}, { case_id: ids[0] })));
+    const lines = [];
+    const code = evalHarness.main(['score', '--run', runDir, '--no-fetch'], (line) => lines.push(line));
+    assert.equal(code, 1);
+    assert.match(lines.join('\n'), /Suite: not passing/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

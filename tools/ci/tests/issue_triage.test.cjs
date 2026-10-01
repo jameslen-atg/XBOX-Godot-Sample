@@ -320,6 +320,26 @@ test('prepareContext writes context files for the agent and publisher', async ()
   assert.equal(core.outputs.digest, digest);
 });
 
+const ineligibleTransitions = [
+  ['closed', { state: 'closed' }, /issue-not-open/],
+  ['security label', { labels: [{ name: 'bug' }, { name: 'Security' }] }, /security-sensitive/],
+  ['jit label', { labels: [{ name: 'jit' }] }, /jit-request/],
+];
+
+for (const [name, overrides, pattern] of ineligibleTransitions) {
+  test(`prepareContext refuses an issue that became ineligible after the gate: ${name}`, async () => {
+    const outDir = path.join(tempDir(), 'triage');
+    const context = { repo: { owner: OWNER, repo: REPO }, payload: makePayload() };
+    const github = fakeGithub({ issue: makeIssue(overrides) });
+    await assert.rejects(
+      triage.prepareContext({ github, context, core: fakeCore(), outDir, sha: SHA }),
+      (error) => error instanceof triage.TriageError && pattern.test(error.message),
+    );
+    assert.equal(fs.existsSync(path.join(outDir, 'context.md')), false);
+    assert.equal(fs.existsSync(path.join(outDir, 'context.json')), false);
+  });
+}
+
 // Report validation ----------------------------------------------------------
 
 test('validateReport accepts a well-formed report', () => {

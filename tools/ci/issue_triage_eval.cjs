@@ -430,10 +430,28 @@ function ensureSource(dir, run, { remote, fetch = true } = {}) {
   return sourceDir;
 }
 
+// A run is only comparable to the case it was prepared from; reject artifacts whose
+// pinned snapshot or issue fixture no longer matches the checked-in case.
+function staleRunErrors(run, caseDef, issue) {
+  const errors = [];
+  if (run.target_sha !== caseDef.target_sha) {
+    errors.push(`target_sha ${run.target_sha} does not match case ${caseDef.target_sha}`);
+  }
+  const currentDigest = fixtureDigest(issue);
+  if (run.fixture_digest !== caseDef.fixture_digest || run.fixture_digest !== currentDigest) {
+    errors.push(`fixture_digest ${run.fixture_digest} does not match current fixture ${currentDigest}`);
+  }
+  return errors;
+}
+
 function scoreRun(runDir, options = {}) {
   const dir = path.resolve(runDir);
   const run = readJson(path.join(dir, 'run.json'));
-  const { expectations } = loadCase(run.case_id);
+  const { caseDef, issue, expectations } = loadCase(run.case_id, options.casesRoot);
+  const stale = staleRunErrors(run, caseDef, issue);
+  if (stale.length) {
+    throw new EvalError(`Run ${dir} is stale for case ${run.case_id}: ${stale.join('; ')}. Re-run prepare for this case.`);
+  }
   const reportFile = findReportFile(dir);
   const validation = reportFile
     ? validateReportAt({ reportText: fs.readFileSync(reportFile, 'utf8'), sourceDir: ensureSource(dir, run, options) })
@@ -521,7 +539,7 @@ const USAGE = `Usage: node tools/ci/issue_triage_eval.cjs <command> [options]
   collect --run DIR --agent-output FILE --item-type TYPE   (Actions: copy the agent's report)
   validate-report --run DIR
   scorecard --run DIR
-  score --run DIR [--run DIR]...   (suite verdict when every case is covered)
+  score --run DIR [--run DIR]...   (exits 0 only when every case has a quality-pass run)
 `;
 
 function main(argv = process.argv.slice(2), log = console.log) {
@@ -586,7 +604,7 @@ function main(argv = process.argv.slice(2), log = console.log) {
       }
       const suite = suiteVerdict(results);
       log(suite.pass ? 'Suite: pass' : `Suite: not passing (failing or missing: ${suite.failing_or_missing.join(', ')})`);
-      return results.every((result) => result.status === STATUS.QUALITY_PASS) ? 0 : 1;
+      return suite.pass ? 0 : 1;
     }
     default:
       log(USAGE);
@@ -615,6 +633,7 @@ module.exports = {
   parseArgs,
   prepare,
   scoreRun,
+  staleRunErrors,
   suiteVerdict,
   validateFixtures,
   validateReportAt,

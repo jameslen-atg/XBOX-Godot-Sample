@@ -67,7 +67,9 @@ Its output differs from the workflow's report:
 1. **Gate** (pre-activation job, read-only token). `runGate` re-reads the
    issue, the trigger comment, and the commenter's permission, and emits
    `eligible`. Unexpected API errors fail the run instead of skipping.
-2. **Context** (agent job). `prepareContext` writes
+2. **Context** (agent job). `prepareContext` re-reads the issue and fails the
+   run before writing anything if it has since closed or gained a JIT or
+   security label, so that content never reaches the agent. Otherwise it writes
    `/tmp/gh-aw/agent/triage/context.md`. It fences the title, body, and earlier
    comments as untrusted text and keeps them within size budgets. It also writes
    `context.json`, which records the analyzed SHA, the issue and comment ids, and
@@ -80,13 +82,19 @@ Its output differs from the workflow's report:
    report is missing, malformed, flagged `security_sensitive`, or cites a path
    or line range that does not exist at the analyzed commit.
 5. **Threat detection**. This is the standard gh-aw detection job.
-6. **Publish** (`post-triage-report` job, the only job with `issues: write`).
+6. **Publish** (`post-triage-report` job, the only job that posts the report).
    `publish` validates everything again and re-checks eligibility. It confirms
    that the issue content digest and SHA still match `context.json`, then
    renders the report. All model text is escaped: no HTML, links, mentions,
    issue references, or headings. Citations become permalinks pinned to the
    analyzed SHA. Before posting, it looks for an existing report for the same
    request and skips if it finds one.
+
+gh-aw also generates a `conclusion` job with `issues: write` in every agentic
+workflow. It is compiler-owned and only handles gh-aw run bookkeeping; this
+workflow disables its failure issues and status comments (see
+[Failure behavior](#failure-behavior)). So two jobs hold `issues: write`:
+`post-triage-report` and `conclusion`. The agent job has only `issues: read`.
 
 Each report carries a hidden marker:
 

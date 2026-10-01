@@ -267,6 +267,11 @@ async function prepareContext({ github, context, core, outDir, sha, botLogin = D
   const issueNumber = payload.issue.number;
   const triggerCommentId = payload.comment.id;
   const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
+  // The issue can close or gain a JIT/security label after the gate; never hand it to the agent then.
+  const skipReason = issueSkipReason(issue);
+  if (skipReason) {
+    throw new TriageError(`Issue is no longer eligible for triage (${skipReason}); no context was prepared.`);
+  }
   const comments = await listIssueComments(github, owner, repo, issueNumber);
   const priorComments = selectPriorComments(comments, triggerCommentId, botLogin);
   const digest = computeDigest(issue, priorComments);
