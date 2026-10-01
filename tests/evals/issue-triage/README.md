@@ -59,11 +59,14 @@ Pass `--remote <name>` if so.
    `critical_failure` (`null` or `{ "reason": "..." }`).
 
 5. Score it. Pass several `--run` options to get a suite verdict once every
-   case is covered. `score` rejects a run whose `target_sha` or
-   `fixture_digest` no longer matches the checked-in case; re-run `prepare`
-   after changing a case. It exits 0 only when every case has a
-   `quality-pass` run, so scoring a single case exits 1 even when that case
-   passes; read the per-run status for single-case checks.
+   case is covered. `prepare` records the case's `target_sha` and
+   `fixture_digest` in `run.json`, plus digests of `expectations.json` and
+   `rubric.md`. `score` rejects a run when any of these no longer match the
+   checked-in case, so an old report is never graded against changed
+   criteria; re-run `prepare` after changing a case or the rubric. It exits 0
+   only when every case has a `quality-pass` run, so scoring a single case
+   exits 1 even when that case passes; read the per-run status for
+   single-case checks.
 
    ```powershell
    node tools\ci\issue_triage_eval.cjs score --run $env:TEMP\tri-eval\<case-id>
@@ -79,7 +82,8 @@ Dispatch **Issue Triage Eval** (`.github/workflows/issue-triage-eval.md`) from
 the Actions tab and pick a case. It runs the same skill in Actions mode against
 the pinned snapshot. It never comments on issues. The run uploads an
 `issue-triage-eval-<case-id>` artifact containing `run.json`, `report.json`,
-and `context/`.
+and `context/`. Its `run.json` `model` field is the agent job's model selector
+(`GH_AW_MODEL_AGENT_COPILOT`, then `GH_AW_DEFAULT_MODEL_COPILOT`, then `auto`).
 
 To score it, download and extract the artifact, then run steps 3–5 above
 against the extracted directory. `validate-report` and `score` rebuild

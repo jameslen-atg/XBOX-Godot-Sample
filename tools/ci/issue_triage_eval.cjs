@@ -18,6 +18,7 @@ const REPO_NAME = 'XBOX-Godot-Sample';
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const EVAL_ROOT = path.join(REPO_ROOT, 'tests', 'evals', 'issue-triage');
 const CASES_ROOT = path.join(EVAL_ROOT, 'cases');
+const RUBRIC_PATH = path.join(EVAL_ROOT, 'rubric.md');
 const SKILL_PATH = '.github/skills/issue-triage/SKILL.md';
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const CASE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -79,6 +80,16 @@ function canonicalJson(value) {
 // Hashes the whole frozen fixture so any field rendered into model input invalidates the digest.
 function fixtureDigest(issue) {
   return crypto.createHash('sha256').update(canonicalJson(issue)).digest('hex');
+}
+
+// Scoring criteria: a run is graded against the expectations and rubric it was prepared with.
+function expectationsDigest(expectations) {
+  return crypto.createHash('sha256').update(canonicalJson(expectations)).digest('hex');
+}
+
+function rubricDigest(rubricPath = RUBRIC_PATH) {
+  const text = fs.readFileSync(rubricPath, 'utf8').replace(/\r\n/g, '\n');
+  return crypto.createHash('sha256').update(text).digest('hex');
 }
 
 function checkCaseShape(id, caseDef, issue, expectations) {
@@ -297,6 +308,8 @@ function prepare({ caseId, outDir, remote, fetch = true, model = null, runId = n
     case_id: caseId,
     issue_url: loaded.issue.url,
     fixture_digest: loaded.caseDef.fixture_digest,
+    expectations_digest: expectationsDigest(loaded.expectations),
+    rubric_digest: rubricDigest(),
     target_sha: sha,
     ...skillProvenance(),
     model,
@@ -431,8 +444,8 @@ function ensureSource(dir, run, { remote, fetch = true } = {}) {
 }
 
 // A run is only comparable to the case it was prepared from; reject artifacts whose
-// pinned snapshot or issue fixture no longer matches the checked-in case.
-function staleRunErrors(run, caseDef, issue) {
+// pinned snapshot, issue fixture, gold expectations, or rubric no longer match.
+function staleRunErrors(run, caseDef, issue, expectations, rubricPath = RUBRIC_PATH) {
   const errors = [];
   if (run.target_sha !== caseDef.target_sha) {
     errors.push(`target_sha ${run.target_sha} does not match case ${caseDef.target_sha}`);
@@ -441,6 +454,14 @@ function staleRunErrors(run, caseDef, issue) {
   if (run.fixture_digest !== caseDef.fixture_digest || run.fixture_digest !== currentDigest) {
     errors.push(`fixture_digest ${run.fixture_digest} does not match current fixture ${currentDigest}`);
   }
+  const currentExpectations = expectationsDigest(expectations);
+  if (run.expectations_digest !== currentExpectations) {
+    errors.push(`expectations_digest ${run.expectations_digest} does not match current expectations ${currentExpectations}`);
+  }
+  const currentRubric = rubricDigest(rubricPath);
+  if (run.rubric_digest !== currentRubric) {
+    errors.push(`rubric_digest ${run.rubric_digest} does not match current rubric ${currentRubric}`);
+  }
   return errors;
 }
 
@@ -448,7 +469,7 @@ function scoreRun(runDir, options = {}) {
   const dir = path.resolve(runDir);
   const run = readJson(path.join(dir, 'run.json'));
   const { caseDef, issue, expectations } = loadCase(run.case_id, options.casesRoot);
-  const stale = staleRunErrors(run, caseDef, issue);
+  const stale = staleRunErrors(run, caseDef, issue, expectations, options.rubricPath);
   if (stale.length) {
     throw new EvalError(`Run ${dir} is stale for case ${run.case_id}: ${stale.join('; ')}. Re-run prepare for this case.`);
   }
@@ -626,12 +647,14 @@ module.exports = {
   collectAgentOutput,
   decide,
   extractReport,
+  expectationsDigest,
   fixtureDigest,
   listCaseIds,
   loadCase,
   main,
   parseArgs,
   prepare,
+  rubricDigest,
   scoreRun,
   staleRunErrors,
   suiteVerdict,

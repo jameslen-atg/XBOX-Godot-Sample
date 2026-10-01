@@ -312,7 +312,15 @@ function writeScorableRun({ runOverrides = {} } = {}) {
   fs.writeFileSync(path.join(runDir, 'source', 'src', 'a.cpp'), 'one\ntwo\nthree\nfour\n');
   fs.writeFileSync(path.join(runDir, 'report.json'), JSON.stringify(report()));
   fs.writeFileSync(path.join(runDir, 'scorecard.json'), JSON.stringify(scorecard({})));
-  const run = { case_id: 'case-a', target_sha: SHA, fixture_digest: caseDef.fixture_digest, outcome: 'completed', ...runOverrides };
+  const run = {
+    case_id: 'case-a',
+    target_sha: SHA,
+    fixture_digest: caseDef.fixture_digest,
+    expectations_digest: evalHarness.expectationsDigest(expectationsFixture()),
+    rubric_digest: evalHarness.rubricDigest(),
+    outcome: 'completed',
+    ...runOverrides,
+  };
   fs.writeFileSync(path.join(runDir, 'run.json'), JSON.stringify(run));
   return { root, casesRoot, runDir };
 }
@@ -329,6 +337,9 @@ test('scoreRun scores a run that matches the current case', () => {
 const staleRuns = [
   ['target_sha', { target_sha: 'c'.repeat(40) }, /target_sha .* does not match case/],
   ['fixture_digest', { fixture_digest: 'd'.repeat(64) }, /fixture_digest .* does not match current fixture/],
+  ['expectations_digest', { expectations_digest: 'e'.repeat(64) }, /expectations_digest .* does not match current expectations/],
+  ['missing expectations_digest', { expectations_digest: undefined }, /expectations_digest undefined does not match/],
+  ['rubric_digest', { rubric_digest: 'f'.repeat(64) }, /rubric_digest .* does not match current rubric/],
 ];
 
 for (const [name, runOverrides, pattern] of staleRuns) {
@@ -349,7 +360,12 @@ test('score exits non-zero when the suite is incomplete even if every supplied r
     const run = JSON.parse(fs.readFileSync(path.join(runDir, 'run.json'), 'utf8'));
     const ids = evalHarness.listCaseIds();
     const realCase = evalHarness.loadCase(ids[0]);
-    Object.assign(run, { case_id: ids[0], target_sha: realCase.caseDef.target_sha, fixture_digest: realCase.caseDef.fixture_digest });
+    Object.assign(run, {
+      case_id: ids[0],
+      target_sha: realCase.caseDef.target_sha,
+      fixture_digest: realCase.caseDef.fixture_digest,
+      expectations_digest: evalHarness.expectationsDigest(realCase.expectations),
+    });
     fs.writeFileSync(path.join(runDir, 'run.json'), JSON.stringify(run));
     fs.writeFileSync(path.join(runDir, 'scorecard.json'), JSON.stringify(scorecard({}, { case_id: ids[0] })));
     const lines = [];

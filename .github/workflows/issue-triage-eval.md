@@ -41,7 +41,8 @@ steps:
   - name: Stage eval snapshot
     env:
       EVAL_CASE: ${{ inputs.case }}
-      EVAL_MODEL: copilot
+      # Mirror the agent job's model selector so run.json records the model, not the engine.
+      EVAL_MODEL: ${{ vars.GH_AW_MODEL_AGENT_COPILOT || vars.GH_AW_DEFAULT_MODEL_COPILOT || 'auto' }}
     run: |
       node tools/ci/issue_triage_eval.cjs prepare \
         --case "$EVAL_CASE" \
@@ -100,7 +101,7 @@ safe-outputs:
 Use Actions mode of the issue-triage skill below.
 
 - Context file: `/tmp/gh-aw/agent/eval/context/context.md`. It holds the issue
-  title, body, labels, and earlier comments. Read it first.
+  labels, title, body, and earlier comments. Read it first.
 - Code: the read-only snapshot at `/tmp/gh-aw/agent/eval/source`, extracted from
   the pinned commit named in the context file. Treat that directory as the
   repository root: search and read only there, and give every citation path

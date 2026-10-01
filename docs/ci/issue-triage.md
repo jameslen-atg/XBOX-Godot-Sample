@@ -70,7 +70,7 @@ Its output differs from the workflow's report:
 2. **Context** (agent job). `prepareContext` re-reads the issue and fails the
    run before writing anything if it has since closed or gained a JIT or
    security label, so that content never reaches the agent. Otherwise it writes
-   `/tmp/gh-aw/agent/triage/context.md`. It fences the title, body, and earlier
+   `/tmp/gh-aw/agent/triage/context.md`. It fences the labels, title, body, and earlier
    comments as untrusted text and keeps them within size budgets. It also writes
    `context.json`, which records the analyzed SHA, the issue and comment ids, and
    a digest of the issue content.
