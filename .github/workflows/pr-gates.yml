@@ -109,9 +109,11 @@ jobs:
           default_gdk=$(jq -r '.default' .github/gdk-versions.json)
           echo "Supported Godot versions: $matrix"
           echo "Default Godot: $default_godot ; default GDK edition: $default_gdk"
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "default_godot=$default_godot" >> "$GITHUB_OUTPUT"
-          echo "default_gdk=$default_gdk" >> "$GITHUB_OUTPUT"
+          {
+            echo "matrix=$matrix"
+            echo "default_godot=$default_godot"
+            echo "default_gdk=$default_gdk"
+          } >> "$GITHUB_OUTPUT"
 
   # Cheap static checks for CI plumbing. Always runs so workflow/action/tooling
   # PRs get real signal without paying for a native build.
@@ -137,10 +139,12 @@ jobs:
         run: |
           set -euo pipefail
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-          files=$(ls .github/workflows/*.yml | grep -v '\.lock\.yml$')
-          echo "$files"
-          # shellcheck disable=SC2086
-          "$(go env GOPATH)/bin/actionlint" -color $files
+          files=()
+          for f in .github/workflows/*.yml; do
+            [[ "$f" == *.lock.yml ]] || files+=("$f")
+          done
+          printf '%s\n' "${files[@]}"
+          "$(go env GOPATH)/bin/actionlint" -color "${files[@]}"
 
       - name: PowerShell syntax parse (tools/)
         shell: pwsh
