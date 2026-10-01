@@ -1,0 +1,65 @@
+{
+  "case_id": "arranged-lobby-config-177",
+  "acceptable_kinds": [
+    "feature"
+  ],
+  "expected_assessment": "Valid feature request: join_arranged_lobby_async hard-codes max members, owner migration, access policy, and invite restriction, while PlayFabLobbyJoinConfig only carries member properties; PlayFabLobbyConfig already models the equivalent create-time options.",
+  "evidence": [
+    {
+      "id": "hardcoded-arranged-config",
+      "required": true,
+      "why": "Arranged-lobby join hard-codes the creation configuration.",
+      "locations": [
+        {
+          "path": "addons/godot_playfab/src/playfab_multiplayer.cpp",
+          "start_line": 1628,
+          "end_line": 1670
+        }
+      ]
+    },
+    {
+      "id": "existing-lobby-config",
+      "required": false,
+      "why": "PlayFabLobbyConfig already exposes owner migration and invite restriction.",
+      "locations": [
+        {
+          "path": "addons/godot_playfab/src/playfab_multiplayer.cpp",
+          "start_line": 317,
+          "end_line": 362
+        },
+        {
+          "path": "addons/godot_playfab/src/playfab_multiplayer.cpp",
+          "start_line": 1495,
+          "end_line": 1515
+        }
+      ]
+    },
+    {
+      "id": "join-config-shape",
+      "required": false,
+      "why": "PlayFabLobbyJoinConfig only binds member properties.",
+      "locations": [
+        {
+          "path": "addons/godot_playfab/src/playfab_multiplayer.cpp",
+          "start_line": 364,
+          "end_line": 380
+        }
+      ]
+    }
+  ],
+  "key_facts": [
+    "Values hard-coded: max member count 8, automatic owner migration, private access, restrict invites false.",
+    "Existing PlayFabLobbyConfig could be reused or mirrored."
+  ],
+  "acceptable_uncertainty": [
+    "Whether to extend PlayFabLobbyJoinConfig or accept a PlayFabLobbyConfig.",
+    "SDK-version gating of April 2026 fields."
+  ],
+  "relevant_questions": [
+    "Which fields must be configurable and default compatibility expectations."
+  ],
+  "avoid": [
+    "Classifying as a bug with a crash.",
+    "Claiming the configuration is already configurable at this commit."
+  ]
+}

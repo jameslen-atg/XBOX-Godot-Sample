@@ -1,0 +1,60 @@
+{
+  "case_id": "gameinput-stuck-actions-parse-178",
+  "acceptable_kinds": [
+    "bug"
+  ],
+  "expected_assessment": "Valid: the helpers return untyped values, so `:=` inference at lines 71-73 fails to parse; the sibling test file annotates return types and does not have the problem.",
+  "evidence": [
+    {
+      "id": "untyped-helpers",
+      "required": true,
+      "why": "Helpers lack return type annotations.",
+      "locations": [
+        {
+          "path": "tests/godot/gameinput/tests/test_gameinput_mapper_stuck_actions.gd",
+          "start_line": 37,
+          "end_line": 55
+        }
+      ]
+    },
+    {
+      "id": "inferred-declarations",
+      "required": true,
+      "why": "`:=` with untyped helper results cannot infer a type.",
+      "locations": [
+        {
+          "path": "tests/godot/gameinput/tests/test_gameinput_mapper_stuck_actions.gd",
+          "start_line": 69,
+          "end_line": 75
+        }
+      ]
+    },
+    {
+      "id": "typed-sibling",
+      "required": false,
+      "why": "Sibling file annotates -> Node / -> Resource.",
+      "locations": [
+        {
+          "path": "tests/godot/gameinput/tests/test_gameinput_mapper_extensions.gd",
+          "start_line": 17,
+          "end_line": 30
+        }
+      ]
+    }
+  ],
+  "key_facts": [
+    "`:=` cannot infer a type from an untyped (Variant) function return.",
+    "Fix by annotating return types or using `=`.",
+    "GUT skips suites that fail to parse, so the file silently does not run."
+  ],
+  "acceptable_uncertainty": [
+    "Whether the error is a warning-as-error setting vs a hard parse error in the given Godot version."
+  ],
+  "relevant_questions": [
+    "Which Godot version and whether the parse gate host list covers this file."
+  ],
+  "avoid": [
+    "Claiming the parse error was reproduced locally.",
+    "Blaming the GameInput native extension."
+  ]
+}

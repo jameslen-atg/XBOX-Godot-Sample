@@ -1,0 +1,23 @@
+{
+  "number": 178,
+  "url": "https://github.com/microsoft/XBOX-Godot-Sample/issues/178",
+  "title": "[GameInput] GameInput stuck actions test file still fails to parse, so its six tests never run",
+  "body": "## What happens\n\n`tests/godot/gameinput/tests/test_gameinput_mapper_stuck_actions.gd` does not parse, so none of its six tests run. The file is collected, the parse fails, and the run continues without those cases being reported as missing.\n\n## Where it stops\n\nThe parse fails on the inferred type declarations that call the file's own helpers:\n\n```\ntests/test_gameinput_mapper_stuck_actions.gd:71 - Cannot infer the type of \"mapper\" variable because the value doesn't have a set type.\ntests/test_gameinput_mapper_stuck_actions.gd:72 - Cannot infer the type of \"first\" variable because the value doesn't have a set type.\ntests/test_gameinput_mapper_stuck_actions.gd:73 - Cannot infer the type of \"second\" variable because the value doesn't have a set type.\n```\n\n13 parse errors in total across the file.\n\nThe two helpers those lines call do not declare a return type:\n\n```gdscript\nfunc _new_action_map_with(action: StringName, source_value: int = 2):   # line 37\nfunc _new_mapper():                                                     # line 48\n```\n\nA GDScript function with no return annotation is treated as returning Variant, and `var x := f()` needs a type it can infer, so each call site using `:=` fails.\n\n## A comparison in the same directory\n\n`test_gameinput_mapper_extensions.gd` uses the same helper pattern and parses cleanly. Its helpers are annotated:\n\n```gdscript\nfunc _new_mapper() -> Node:\nfunc _new_action_map_with(action_name: StringName, source_value: int) -> Resource:\n```\n\nAdding equivalent annotations to the stuck actions file, or changing those call sites from `:=` to `=`, looks like it would be enough. I have not sent a PR in case you would rather fold this into the module rework.\n\n## Tests that currently do not run\n\n- `test_action_map_swap_releases_previous_held_action`\n- `test_active_map_mutations_release_held_actions_and_invalidate_cache`\n- `test_binding_property_mutation_releases_held_action`\n- `test_uninitialized_runtime_early_return_releases_held_action`\n- `test_missing_target_device_releases_held_action`\n- `test_non_gamepad_target_without_reading_releases_held_action`\n\nThese cover the mapper releasing held actions, so that behaviour is currently unverified by the suite.\n\n## Reproduces on\n\n4.5.1-stable, 4.6.1-stable and 4.7.1-stable, in both the standard and .NET builds. Same 13 inference errors and a non-zero exit on all six.\n\n## How to reproduce\n\nImport the project before checking the script. Without the import pass the GDExtension is not loaded, the super class does not resolve, and that error masks this one:\n\n```\ngodot --headless --path tests/godot/gameinput --import\ngodot --headless --path tests/godot/gameinput --check-only --script res://tests/test_gameinput_mapper_stuck_actions.gd\n```\n\n## Note\n\n#162 described this same file failing to parse and is closed. The parse failure still reproduces on current `main` (f6c1628), so it may be worth reopening that one or tracking it here instead.\n\nFound while running the godot-bvt test harness across the sample's addon and engine matrix.\r\n",
+  "state": "open",
+  "labels": [
+    {
+      "name": "bug"
+    },
+    {
+      "name": "GameInput"
+    }
+  ],
+  "user": {
+    "login": "zachhooper",
+    "type": "User"
+  },
+  "created_at": "2026-09-09T19:10:49Z",
+  "captured_at": "2026-09-29T16:26:31Z",
+  "discussion_cutoff": "2026-09-29T16:26:31Z",
+  "comments": []
+}

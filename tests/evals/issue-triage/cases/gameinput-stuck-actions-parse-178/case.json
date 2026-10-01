@@ -1,0 +1,8 @@
+{
+  "id": "gameinput-stuck-actions-parse-178",
+  "issue_file": "issue.json",
+  "expectations_file": "expectations.json",
+  "target_sha": "f6c16289e939729b474e9009c5dd1ec1d23015ba",
+  "sha_justification": "The issue reports `f6c1628`; the test file is unchanged there.",
+  "fixture_digest": "909b46168b293a8ee91e1aa91c9a41f962ddb8958a045663609fdca3111916fb"
+}

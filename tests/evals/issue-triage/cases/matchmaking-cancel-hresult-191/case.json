@@ -1,0 +1,8 @@
+{
+  "id": "matchmaking-cancel-hresult-191",
+  "issue_file": "issue.json",
+  "expectations_file": "expectations.json",
+  "target_sha": "b1b4e0b9cc226a87460dbbf93350e82430c407d5",
+  "sha_justification": "The issue reports `main @ b1b4e0b`; this is that commit, before any fix landed.",
+  "fixture_digest": "bd6d9dd7b14cf9a852784a90b48cbbed7bc5bc19c3ce96a861e28ae627d90f82"
+}

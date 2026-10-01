@@ -1,0 +1,41 @@
+{
+  "number": 190,
+  "url": "https://github.com/microsoft/XBOX-Godot-Sample/issues/190",
+  "title": "[Virtual Keyboard] Add Open and Closed events",
+  "body": "As an extension of #187 we should add the events that Windows exposes for an application to be notified of the Virtual Keyboard being opened or closed. See https://github.com/microsoft/Xbox-GDK-Samples/blob/main/Samples/Handheld/Snippets/VirtualKeyboard.cpp for reference.",
+  "state": "open",
+  "labels": [
+    {
+      "name": "bug"
+    }
+  ],
+  "user": {
+    "login": "jameslen-atg",
+    "type": "User"
+  },
+  "created_at": "2026-09-23T18:00:43Z",
+  "captured_at": "2026-09-29T16:26:31Z",
+  "discussion_cutoff": "2026-09-29T16:26:31Z",
+  "comments": [
+    {
+      "id": 5850437217,
+      "user": {
+        "login": "babaJaan01",
+        "type": "User"
+      },
+      "author_association": "CONTRIBUTOR",
+      "created_at": "2026-09-26T22:25:14Z",
+      "body": "Hi @GerardoMal-ATG, I can see it says you are one of the assignees for the issue. Since this extends the virtual-keyboard support I contributed in #187, I’d be happy to implement the complete #190 change if that would help. Are you already implementing this, or would you be okay with me implementing the issue? Thanks :)"
+    },
+    {
+      "id": 5875920897,
+      "user": {
+        "login": "zachhooper",
+        "type": "User"
+      },
+      "author_association": "MEMBER",
+      "created_at": "2026-09-28T18:18:30Z",
+      "body": "@babaJaan01 - We have not yet started. I've assigned this over to you. Feel free to contribute another PR. We really appreciate your help here!"
+    }
+  ]
+}

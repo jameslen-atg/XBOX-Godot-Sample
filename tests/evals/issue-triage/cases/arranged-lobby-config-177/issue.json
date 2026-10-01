@@ -1,0 +1,20 @@
+{
+  "number": 177,
+  "url": "https://github.com/microsoft/XBOX-Godot-Sample/issues/177",
+  "title": "[PlayFab Matchmaking] Make arranged-lobby initialization configurable",
+  "body": "## Feature request\r\n\r\nMake arranged-lobby initialization configurable instead of hardcoding capacity and policy. Arranged joining is already exposed; the missing surface is its native first-joiner configuration.\r\n\r\n## Current gap\r\n\r\nAt `f6c16289e939729b474e9009c5dd1ec1d23015ba`, [join_arranged_lobby_async](https://github.com/microsoft/XBOX-Godot-Sample/blob/f6c16289e939729b474e9009c5dd1ec1d23015ba/addons/godot_playfab/src/playfab_multiplayer.cpp#L1655-L1664) sets:\r\n\r\n- `maxMemberCount = 8`\r\n- automatic owner migration\r\n- private access\r\n- unrestricted invitations, even on SDK editions that support the restriction field\r\n\r\nThe supplied join configuration exposes only the local member's properties. These fixed choices do not fit every matchmaking queue, especially groups larger than eight members.\r\n\r\nThe native [PFLobbyArrangedJoinConfiguration](https://learn.microsoft.com/en-us/xbox/playfab/multiplayer/lobby/playfabmultiplayerreference-cpp/pflobby/structs/pflobbyarrangedjoinconfiguration) exposes these settings and documents which initialize the lobby when this client is the first joiner.\r\n\r\n## Requested behavior\r\n\r\n- Expose capacity, owner-migration policy, access policy, and the supported owner-only invitation restriction, alongside the existing member properties.\r\n- Use a dedicated arranged-join configuration or another clearly scoped API; do not imply these fields can reconfigure an ordinary existing-lobby join.\r\n- Document first-joiner initialization semantics and recommend consistent settings across participants.\r\n- Preserve/document defaults when callers omit the configuration, and validate values according to native limits and rules. Server ownership policy is not valid for this client-arranged flow.\r\n- Retain the existing SDK-edition compatibility behavior for `restrictInvitesToLobbyOwner`, including explicit unsupported errors when applicable.\r\n- Do not describe later property updates as a substitute for creation-only owner-migration policy.\r\n\r\n## Acceptance coverage\r\n\r\nInitialize an arrangement with a non-default capacity, including a value above eight within SDK limits, and verify the first joiner creates the expected lobby. Verify non-default access/migration settings and subsequent members' own properties without falsely treating their configuration as an update. Cover supported/unsupported invitation restrictions, invalid configuration, native failures, and the existing omitted-config path.\r\n\r\nRelated: microsoft/XBOX-Godot-Sample#170 covers updates after creation; this issue addresses arranged-lobby initialization. Record live matchmaking/arranged-lobby coverage separately from fixtures.\r\n",
+  "state": "open",
+  "labels": [
+    {
+      "name": "PlayFab"
+    }
+  ],
+  "user": {
+    "login": "jameslen-atg",
+    "type": "User"
+  },
+  "created_at": "2026-09-08T21:35:47Z",
+  "captured_at": "2026-09-29T16:26:31Z",
+  "discussion_cutoff": "2026-09-29T16:26:31Z",
+  "comments": []
+}

@@ -1,0 +1,79 @@
+{
+  "case_id": "virtual-keyboard-events-190",
+  "acceptable_kinds": [
+    "feature"
+  ],
+  "expected_assessment": "Feature request despite the bug label: show/hide_virtual_keyboard exist but XboxGameUI declares no signals, so there is no way to observe the keyboard opening or closing. CoreInputView showing/hiding events are the likely source.",
+  "evidence": [
+    {
+      "id": "show-hide-impl",
+      "required": true,
+      "why": "Show/hide call CoreInputView TryShow/TryHide and return only an accepted bool.",
+      "locations": [
+        {
+          "path": "addons/godot_gdk/src/xbox_game_ui.cpp",
+          "start_line": 984,
+          "end_line": 1030
+        }
+      ]
+    },
+    {
+      "id": "no-signals",
+      "required": false,
+      "why": "XboxGameUI documents no signals.",
+      "locations": [
+        {
+          "path": "addons/godot_gdk/doc_classes/XboxGameUI.xml",
+          "start_line": 97,
+          "end_line": 113
+        }
+      ]
+    },
+    {
+      "id": "bindings",
+      "required": false,
+      "why": "Only show/hide methods are bound.",
+      "locations": [
+        {
+          "path": "addons/godot_gdk/src/xbox_game_ui.cpp",
+          "start_line": 523,
+          "end_line": 524
+        },
+        {
+          "path": "addons/godot_gdk/src/xbox_game_ui.h",
+          "start_line": 73,
+          "end_line": 74
+        }
+      ]
+    },
+    {
+      "id": "csharp-wrapper",
+      "required": false,
+      "why": "C# wrapper would need matching events.",
+      "locations": [
+        {
+          "path": "addons/godot_gdk_csharp/Services/XboxGameUi.cs",
+          "start_line": 51,
+          "end_line": 55
+        }
+      ]
+    }
+  ],
+  "key_facts": [
+    "No open/closed signals exist yet.",
+    "TryShow/TryHide results are best-effort requests, not state.",
+    "Events must be marshalled to the Godot main thread."
+  ],
+  "acceptable_uncertainty": [
+    "Exact CoreInputView event names and availability on the target Windows SDK.",
+    "Whether events fire for keyboards not opened by the app."
+  ],
+  "relevant_questions": [
+    "Signal payload expectations (occluded rect?).",
+    "Threading/dispatch model for CoreInputView events."
+  ],
+  "avoid": [
+    "Treating the bug label as proof of a defect.",
+    "Claiming signals already exist."
+  ]
+}
