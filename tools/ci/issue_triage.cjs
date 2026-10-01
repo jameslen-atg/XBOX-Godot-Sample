@@ -28,7 +28,14 @@ const LIMITS = Object.freeze({
   maxCitationSpan: 200,
   maxCitedFileBytes: 2 * 1024 * 1024,
   maxCommentBodyChars: 60000,
+  maxDocReferences: 6,
+  maxDocUrlChars: 500,
 });
+
+// Documentation hosts the agent may fetch (network.allowed in the workflows) and cite
+// in `doc_references`. Keep this list and the workflow allow lists in sync.
+const DOC_HOSTS = Object.freeze(['devdocs.xbox.com', 'learn.microsoft.com']);
+const DOC_URL_CHARS = /^[A-Za-z0-9\-._~/%#+,=:@!$&'*;()]+$/;
 
 const REPORT_KINDS = new Set(['bug', 'feature', 'question', 'other']);
 const CONFIDENCE_LEVELS = new Set(['low', 'medium', 'high']);
@@ -39,6 +46,7 @@ const REPORT_FIELDS = Object.freeze({
   confidence: { type: 'enum', values: CONFIDENCE_LEVELS },
   confidence_rationale: { type: 'string', min: 1, max: 600 },
   findings: { type: 'findings' },
+  doc_references: { type: 'doc_references' },
   version_notes: { type: 'string', min: 0, max: 1000 },
   missing_information: { type: 'list', itemMax: 300 },
   next_steps: { type: 'list', itemMax: 300 },
@@ -302,6 +310,28 @@ function checkString(name, value, min, max, errors) {
   if (value.length > max) errors.push(`${name} exceeds ${max} characters`);
 }
 
+// Accepts only plain HTTPS documentation URLs on DOC_HOSTS and returns the
+// normalized href. Throws a bare reason message on rejection.
+function normalizeDocUrl(raw) {
+  if (typeof raw !== 'string') throw new Error('must be a string');
+  if (raw.length > LIMITS.maxDocUrlChars) throw new Error(`exceeds ${LIMITS.maxDocUrlChars} characters`);
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error('is not a valid URL');
+  }
+  if (url.protocol !== 'https:') throw new Error('must use https');
+  if (url.username || url.password) throw new Error('must not contain credentials');
+  if (url.port) throw new Error('must not specify a port');
+  if (!DOC_HOSTS.includes(url.hostname)) throw new Error(`host must be one of: ${DOC_HOSTS.join(', ')}`);
+  if (url.search) throw new Error('must not contain a query string');
+  const rest = url.href.slice(`https://${url.hostname}`.length);
+  if (!rest.startsWith('/') || !DOC_URL_CHARS.test(rest)) throw new Error('contains unsupported characters');
+  if (url.href.length > LIMITS.maxDocUrlChars) throw new Error(`exceeds ${LIMITS.maxDocUrlChars} characters`);
+  return url.href;
+}
+
 function validateReport(report) {
   const errors = [];
   if (!report || typeof report !== 'object' || Array.isArray(report)) {
@@ -346,6 +376,28 @@ function validateReport(report) {
           checkString(`findings[${i}].explanation`, finding.explanation, 1, 800, errors);
           for (const key of ['start_line', 'end_line']) {
             if (!Number.isInteger(finding[key])) errors.push(`findings[${i}].${key} must be an integer`);
+          }
+        });
+      }
+    } else if (spec.type === 'doc_references') {
+      if (!Array.isArray(value)) errors.push('doc_references must be an array');
+      else {
+        if (value.length > LIMITS.maxDocReferences) {
+          errors.push(`doc_references has more than ${LIMITS.maxDocReferences} items`);
+        }
+        value.forEach((ref, i) => {
+          if (!ref || typeof ref !== 'object' || Array.isArray(ref)) {
+            errors.push(`doc_references[${i}] must be an object`);
+            return;
+          }
+          for (const key of Object.keys(ref)) {
+            if (!['url', 'explanation'].includes(key)) errors.push(`doc_references[${i}] has unknown field: ${key}`);
+          }
+          checkString(`doc_references[${i}].explanation`, ref.explanation, 1, 800, errors);
+          try {
+            normalizeDocUrl(ref.url);
+          } catch (error) {
+            errors.push(`doc_references[${i}].url ${error.message}`);
           }
         });
       }
@@ -510,6 +562,16 @@ function renderReport({ report, citations, owner, repo, repoId, issueNumber, com
   } else {
     lines.push('No specific code locations were identified.');
   }
+  if (report.doc_references.length) {
+    lines.push('', '### Documentation', '');
+    report.doc_references.forEach((ref, i) => {
+      const href = normalizeDocUrl(ref.url);
+      const target = href.replace(/[()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+      const label = href.replace(/^https:\/\//, '').replace(/#.*$/, '');
+      const explanation = escapeMarkdown(ref.explanation).replace(/\n/g, ' ');
+      lines.push(`${i + 1}. [${codeSpan(label)}](${target}): ${explanation}`);
+    });
+  }
   if (report.version_notes.trim()) {
     lines.push('', '### Version notes', '', escapeMarkdown(report.version_notes));
   }
@@ -627,6 +689,7 @@ async function publish({ github, context, core, env, root, agentOutputPath, cont
 module.exports = {
   COMMAND,
   DEFAULT_BOT_LOGIN,
+  DOC_HOSTS,
   LIMITS,
   MARKER_NAME,
   REPORT_ITEM_TYPE,
@@ -643,6 +706,7 @@ module.exports = {
   isTriageCommand,
   issueSkipReason,
   markerPrefix,
+  normalizeDocUrl,
   parseReportValue,
   permalink,
   prepareContext,

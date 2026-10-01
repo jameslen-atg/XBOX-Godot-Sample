@@ -149,6 +149,7 @@ function validReport(overrides = {}) {
     confidence: 'medium',
     confidence_rationale: 'Static reading only.',
     findings: [{ path: 'addons/godot_gdk/src/users.cpp', start_line: 10, end_line: 20, explanation: 'Null check missing.' }],
+    doc_references: [],
     version_notes: '',
     missing_information: ['Which GDK version?'],
     next_steps: ['Add a null check.'],
@@ -366,6 +367,21 @@ const invalidReports = [
   ['too many steps', { next_steps: Array(9).fill('x') }, /more than 8/],
   ['bad finding line', { findings: [{ path: 'a', start_line: '1', end_line: 2, explanation: 'x' }] }, /start_line must be an integer/],
   ['finding extra key', { findings: [{ path: 'a', start_line: 1, end_line: 2, explanation: 'x', url: 'y' }] }, /unknown field: url/],
+  ['doc refs not array', { doc_references: 'x' }, /doc_references must be an array/],
+  ['doc ref extra key', { doc_references: [{ url: 'https://devdocs.xbox.com/a', explanation: 'x', title: 't' }] }, /unknown field: title/],
+  ['doc ref empty explanation', { doc_references: [{ url: 'https://devdocs.xbox.com/a', explanation: ' ' }] }, /explanation must not be empty/],
+  ['doc ref http', { doc_references: [{ url: 'http://devdocs.xbox.com/a', explanation: 'x' }] }, /must use https/],
+  ['doc ref other host', { doc_references: [{ url: 'https://example.com/a', explanation: 'x' }] }, /host must be one of/],
+  ['doc ref lookalike host', { doc_references: [{ url: 'https://devdocs.xbox.com.evil.test/a', explanation: 'x' }] }, /host must be one of/],
+  ['doc ref subdomain', { doc_references: [{ url: 'https://x.learn.microsoft.com/a', explanation: 'x' }] }, /host must be one of/],
+  ['doc ref credentials', { doc_references: [{ url: 'https://u:p@devdocs.xbox.com/a', explanation: 'x' }] }, /credentials/],
+  ['doc ref port', { doc_references: [{ url: 'https://devdocs.xbox.com:8443/a', explanation: 'x' }] }, /port/],
+  ['doc ref query', { doc_references: [{ url: 'https://learn.microsoft.com/a?x=1', explanation: 'x' }] }, /query string/],
+  ['doc ref not url', { doc_references: [{ url: 'devdocs.xbox.com/a', explanation: 'x' }] }, /not a valid URL/],
+  ['doc ref non-string', { doc_references: [{ url: 7, explanation: 'x' }] }, /url must be a string/],
+  ['doc ref too long', { doc_references: [{ url: `https://devdocs.xbox.com/${'a'.repeat(500)}`, explanation: 'x' }] }, /exceeds 500/],
+  ['doc ref bad chars', { doc_references: [{ url: 'https://devdocs.xbox.com/a[b]|c', explanation: 'x' }] }, /unsupported characters/],
+  ['too many doc refs', { doc_references: Array(7).fill({ url: 'https://devdocs.xbox.com/a', explanation: 'x' }) }, /more than 6/],
 ];
 
 for (const [name, overrides, pattern] of invalidReports) {
@@ -378,6 +394,19 @@ test('validateReport rejects missing fields', () => {
   const report = validReport();
   delete report.next_steps;
   assert.throws(() => triage.validateReport(report), /missing field: next_steps/);
+  const noDocs = validReport();
+  delete noDocs.doc_references;
+  assert.throws(() => triage.validateReport(noDocs), /missing field: doc_references/);
+});
+
+test('validateReport accepts allow-listed documentation references', () => {
+  const docs = [
+    { url: 'https://devdocs.xbox.com/en-us/gdk/xuser#remarks', explanation: 'XUser sign-in rules.' },
+    { url: 'https://learn.microsoft.com/en-us/gaming/playfab/features/multiplayer/lobby/', explanation: 'Lobby limits.' },
+  ];
+  assert.doesNotThrow(() => triage.validateReport(validReport({ doc_references: docs })));
+  assert.deepEqual([...triage.DOC_HOSTS].sort(), ['devdocs.xbox.com', 'learn.microsoft.com']);
+  assert.equal(triage.normalizeDocUrl('https://DevDocs.Xbox.com/a'), 'https://devdocs.xbox.com/a');
 });
 
 test('parseReportValue accepts JSON strings, fenced JSON, and objects', () => {
@@ -515,7 +544,32 @@ test('renderReport produces a marked, linked, escaped comment', () => {
   assert.ok(!body.includes('<b>'));
   assert.ok(body.includes('### Version notes'));
   assert.ok(body.includes('### Missing information'));
+  assert.ok(!body.includes('### Documentation'));
   assert.equal((body.match(/<!--/g) || []).length, 1);
+});
+
+test('renderReport lists documentation references as inert links', () => {
+  const report = validReport({
+    doc_references: [
+      { url: 'https://learn.microsoft.com/en-us/gaming/a_(b)#sec', explanation: 'See @team [here](https://evil.test)' },
+    ],
+  });
+  const body = triage.renderReport({
+    report,
+    citations: [{ path: USERS, start: 10, end: 20 }],
+    owner: OWNER,
+    repo: REPO,
+    repoId: REPO_ID,
+    issueNumber: 7,
+    commentId: 100,
+    commentUrl: 'https://github.com/c/100',
+    runUrl: 'https://github.com/r/42',
+    sha: SHA,
+  });
+  assert.ok(body.includes('### Documentation'));
+  assert.ok(body.includes('1. [`learn.microsoft.com/en-us/gaming/a_(b)`](https://learn.microsoft.com/en-us/gaming/a_%28b%29#sec): '));
+  assert.ok(body.includes('@\u2060team'));
+  assert.ok(!body.includes('](https://evil.test)'));
 });
 
 // Agent-job validation -------------------------------------------------------

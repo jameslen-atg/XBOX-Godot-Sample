@@ -75,19 +75,27 @@ Its output differs from the workflow's report:
    `context.json`, which records the analyzed SHA, the issue and comment ids, and
    a digest of the issue content.
 3. **Agent**. The Copilot engine reads the context and the checked-out
-   workspace, following the skill's Actions mode. It has no shell, no editing, and no GitHub tools, and runs behind
-   the gh-aw network firewall. It must call `post_triage_report` exactly once
+   workspace, following the skill's Actions mode. It has no shell, no editing,
+   and no GitHub tools, and runs behind the gh-aw network firewall. Its only
+   network tool is `web-fetch`, and the firewall allows only the gh-aw
+   `defaults` set plus `devdocs.xbox.com` and `learn.microsoft.com`, so it can
+   read GDK and PlayFab documentation. The skill forbids fetching URLs taken
+   from the issue. The workflow's `network.allowed` list and `DOC_HOSTS` in
+   `tools/ci/issue_triage.cjs` must stay in sync. It must call `post_triage_report` exactly once
    with a JSON report that matches the schema in the prompt.
 4. **Validation** (agent post-step). `validateAgentOutput` fails the run if the
-   report is missing, malformed, flagged `security_sensitive`, or cites a path
-   or line range that does not exist at the analyzed commit.
+   report is missing, malformed, flagged `security_sensitive`, cites a path
+   or line range that does not exist at the analyzed commit, or lists a
+   `doc_references` URL that is not plain HTTPS on a `DOC_HOSTS` host (no
+   query string, credentials, or port).
 5. **Threat detection**. This is the standard gh-aw detection job.
 6. **Publish** (`post-triage-report` job, the only job that posts the report).
    `publish` validates everything again and re-checks eligibility. It confirms
    that the issue content digest and SHA still match `context.json`, then
    renders the report. All model text is escaped: no HTML, links, mentions,
    issue references, or headings. Citations become permalinks pinned to the
-   analyzed SHA. Before posting, it looks for an existing report for the same
+   analyzed SHA. Validated `doc_references` are the only other links; they are
+   listed under "Documentation". Before posting, it looks for an existing report for the same
    request and skips if it finds one.
 
 gh-aw also generates a `conclusion` job with `issues: write` in every agentic

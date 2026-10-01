@@ -37,7 +37,12 @@ permissions:
   copilot-requests: write
 engine:
   id: copilot
-network: defaults
+# Keep in sync with DOC_HOSTS in tools/ci/issue_triage.cjs.
+network:
+  allowed:
+    - defaults
+    - devdocs.xbox.com
+    - learn.microsoft.com
 strict: true
 concurrency:
   group: issue-triage-${{ github.repository_id }}-${{ github.event.issue.number }}-${{ github.event.comment.id }}
@@ -47,6 +52,7 @@ tools:
   bash: false
   cli-proxy: false
   edit: false
+  web-fetch:
 max-turns: 30
 max-ai-credits: 200
 timeout-minutes: 20
