@@ -1,0 +1,740 @@
+'use strict';
+
+// Deterministic helpers for the Microsoft GDK release watcher
+// (.github/workflows/gdk-release-watch.yml). GitHub cannot deliver a `release`
+// event from microsoft/GDK to this repository, so a scheduled job polls the
+// upstream release list, keeps a durable bot-owned issue ledger, and dispatches
+// the agentic assessor (.github/workflows/gdk-release-assess.md) for one queued
+// release at a time.
+//
+// Everything that decides eligibility, identity, ordering, or state lives here
+// so it can be unit tested (tools/ci/tests/gdk_release_watch.test.cjs). The
+// model never participates in discovery.
+
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const UPSTREAM_OWNER = 'microsoft';
+const UPSTREAM_REPO = 'GDK';
+const TARGET_REPO = 'microsoft/XBOX-Godot-Sample';
+const TRUSTED_REF = 'refs/heads/main';
+const ASSESS_WORKFLOW = 'gdk-release-assess.lock.yml';
+
+// Oldest edition this automation will ever queue. The October 2025 (2510)
+// family is deliberately excluded: those editions are missing GDK features the
+// addons depend on, so adding them is not a simple supported-list change. Any
+// 2510 edition already in the supported lists stays there; the watcher just
+// never proposes a new one. Keep in sync with docs/ci/gdk-release-watch.md.
+const MINIMUM_EDITION = 260400;
+
+const MARKER_NAME = 'xbox-godot-gdk-release';
+const STATE_MARKER_NAME = 'xbox-godot-gdk-release-state';
+const DEFAULT_BOT_LOGIN = 'github-actions[bot]';
+const TRACKING_LABEL = 'gdk-release';
+
+const LIMITS = Object.freeze({
+  maxReleasePages: 5,
+  releasesPerPage: 100,
+  maxIssueBodyChars: 60000,
+  maxNotesChars: 40000,
+  maxQueuedPerRun: 1,
+});
+
+const MONTHS = Object.freeze({
+  january: 1,
+  february: 2,
+  march: 3,
+  april: 4,
+  may: 5,
+  june: 6,
+  july: 7,
+  august: 8,
+  september: 9,
+  october: 10,
+  november: 11,
+  december: 12,
+});
+
+// `April-2026-Update-5-v2604.5.7903` / `April-2026-v2604.0.7822`.
+const TAG_PATTERN = /^([A-Za-z]+)-(20\d{2})(?:-Update-(\d{1,2}))?-v(\d{4})\.(\d{1,2})\.(\d{1,6})$/;
+// `GDK_2604.5.7903.zip` is the SDK archive; other assets (remote iteration
+// tooling, for example) ship alongside it and are ignored.
+const SDK_ASSET_PATTERN = /^GDK_(\d{4})\.(\d{1,2})\.(\d{1,6})\.zip$/i;
+
+const ASSESSMENT_STATUSES = Object.freeze([
+  'awaiting-assessment',
+  'assessment-dispatched',
+  'assessment-failed',
+  'changes-required',
+  'tests-only',
+  'needs-review',
+]);
+
+class WatchError extends Error {}
+
+function statusOf(error) {
+  return error && typeof error.status === 'number' ? error.status : undefined;
+}
+
+function editionOf(family, update) {
+  return `${family}${String(update).padStart(2, '0')}`;
+}
+
+// Parses a modern versioned GDK tag. Returns null when the tag is not of that
+// shape at all, and `{ conflict }` when it is but its own components disagree —
+// a disagreement means we cannot trust the SDK identity and must not guess.
+function parseGdkTag(tag) {
+  const match = TAG_PATTERN.exec(String(tag || ''));
+  if (!match) return null;
+  const [, monthName, yearText, updateText, familyText, updateComponent, buildText] = match;
+  const month = MONTHS[monthName.toLowerCase()];
+  if (!month) return null;
+  const year = Number(yearText);
+  const family = Number(familyText);
+  const update = Number(updateComponent);
+  const build = Number(buildText);
+  const labelUpdate = updateText === undefined ? 0 : Number(updateText);
+  const expectedFamily = (year % 100) * 100 + month;
+  if (family !== expectedFamily) {
+    return { conflict: `tag names ${monthName} ${year} but carries version family ${family}` };
+  }
+  if (update !== labelUpdate) {
+    return { conflict: `tag names update ${labelUpdate} but carries version update ${update}` };
+  }
+  if (update > 99) return { conflict: `update ${update} does not map to a 6-digit edition` };
+  return {
+    version: `${family}.${update}.${build}`,
+    family,
+    update,
+    build,
+    edition: editionOf(family, update),
+    releaseLabel: `${monthName} ${year}${labelUpdate ? ` Update ${labelUpdate}` : ''}`,
+  };
+}
+
+function sdkAssets(release) {
+  return (release.assets || [])
+    .map((asset) => {
+      const match = SDK_ASSET_PATTERN.exec(String((asset && asset.name) || ''));
+      if (!match) return null;
+      return { name: asset.name, version: `${Number(match[1])}.${Number(match[2])}.${Number(match[3])}` };
+    })
+    .filter(Boolean);
+}
+
+// `ignored` releases are permanently out of scope; `conflict` releases are
+// reported so a human looks at them instead of being silently dropped.
+function classifyRelease(release) {
+  const tag = String((release && release.tag_name) || '');
+  if (!release || !tag) return { status: 'conflict', reason: 'release has no tag' };
+  if (release.draft) return { status: 'ignored', reason: 'draft release' };
+  if (release.prerelease) return { status: 'ignored', reason: 'pre-release' };
+
+  const parsed = parseGdkTag(tag);
+  if (!parsed) return { status: 'ignored', reason: 'not a versioned public GDK release tag' };
+  if (parsed.conflict) return { status: 'conflict', reason: parsed.conflict };
+
+  const name = String(release.name || '');
+  if (!/\bGDK\b/i.test(name)) {
+    return { status: 'conflict', reason: `release title ${JSON.stringify(name)} does not identify a GDK release` };
+  }
+
+  const assets = sdkAssets(release);
+  if (assets.length === 0) {
+    return { status: 'conflict', reason: 'release publishes no GDK_<version>.zip SDK archive' };
+  }
+  if (assets.length > 1) {
+    return { status: 'conflict', reason: `release publishes ${assets.length} SDK archives` };
+  }
+  if (assets[0].version !== parsed.version) {
+    return { status: 'conflict', reason: `tag version ${parsed.version} disagrees with asset ${assets[0].name}` };
+  }
+
+  if (Number(parsed.edition) < MINIMUM_EDITION) {
+    return { status: 'ignored', reason: `edition ${parsed.edition} predates the minimum supported edition ${MINIMUM_EDITION}` };
+  }
+
+  return {
+    status: 'eligible',
+    release: {
+      id: release.id,
+      tag,
+      name,
+      url: release.html_url,
+      publishedAt: release.published_at,
+      asset: assets[0].name,
+      ...parsed,
+    },
+  };
+}
+
+function parseSupportedEditions(cmakeText) {
+  const match = /set\(GDK_SUPPORTED_VERSIONS\s+"([^"]*)"/.exec(String(cmakeText));
+  if (!match) throw new WatchError('GDK_SUPPORTED_VERSIONS was not found in cmake/GDKDependencies.cmake.');
+  const editions = match[1]
+    .split(';')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!editions.length) throw new WatchError('GDK_SUPPORTED_VERSIONS is empty.');
+  for (const edition of editions) {
+    if (!/^\d{6}$/.test(edition)) throw new WatchError(`GDK_SUPPORTED_VERSIONS contains a non-edition entry: ${edition}`);
+  }
+  return editions;
+}
+
+function parseHostedMatrix(json) {
+  if (!json || typeof json !== 'object') throw new WatchError('.github/gdk-versions.json is not an object.');
+  if (typeof json.default !== 'string' || !json.default) throw new WatchError('.github/gdk-versions.json has no "default".');
+  if (!Array.isArray(json.supported) || !json.supported.length) {
+    throw new WatchError('.github/gdk-versions.json has no "supported" entries.');
+  }
+  const supported = json.supported.map((entry, index) => {
+    if (!entry || typeof entry !== 'object') throw new WatchError(`supported[${index}] is not an object.`);
+    const parsed = /^(\d{4})\.(\d{1,2})\.(\d{1,6})$/.exec(String(entry.version || ''));
+    if (!parsed) throw new WatchError(`supported[${index}].version is not a YYMM.N.build port version.`);
+    const expectedEdition = editionOf(Number(parsed[1]), Number(parsed[2]));
+    if (String(entry.edition) !== expectedEdition) {
+      throw new WatchError(`supported[${index}] maps ${entry.version} to edition ${entry.edition}, expected ${expectedEdition}.`);
+    }
+    return { version: entry.version, edition: expectedEdition, release: String(entry.release || '') };
+  });
+  if (!supported.some((entry) => entry.version === json.default)) {
+    throw new WatchError(`.github/gdk-versions.json "default" ${json.default} is not in "supported".`);
+  }
+  return { default: json.default, supported };
+}
+
+function parseRegistryBaseline(json) {
+  const registry = json && json['default-registry'];
+  const baseline = registry && registry.baseline;
+  if (!/^[0-9a-f]{40}$/.test(String(baseline || ''))) {
+    throw new WatchError('vcpkg-configuration.json does not pin a 40-character default-registry baseline.');
+  }
+  return baseline;
+}
+
+function readJsonFile(root, relative) {
+  const file = path.join(root, relative);
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    throw new WatchError(`${relative} could not be read: ${error.message}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new WatchError(`${relative} is not valid JSON: ${error.message}`);
+  }
+}
+
+// The two support lists are independent and are not interchangeable: the CMake
+// allowlist governs an SDK installed on disk, the hosted matrix governs vcpkg
+// `ms-gdk` port versions that a GitHub-hosted runner can restore.
+function readSupportState(root) {
+  const cmakePath = path.join(root, 'cmake', 'GDKDependencies.cmake');
+  let cmakeText;
+  try {
+    cmakeText = fs.readFileSync(cmakePath, 'utf8');
+  } catch (error) {
+    throw new WatchError(`cmake/GDKDependencies.cmake could not be read: ${error.message}`);
+  }
+  const installedEditions = parseSupportedEditions(cmakeText);
+  const hosted = parseHostedMatrix(readJsonFile(root, path.join('.github', 'gdk-versions.json')));
+  const baseline = parseRegistryBaseline(readJsonFile(root, 'vcpkg-configuration.json'));
+  return {
+    installedEditions,
+    hosted,
+    baseline,
+    minimumEdition: String(MINIMUM_EDITION),
+  };
+}
+
+// Installed-allowlist membership is what "supported" means for this repository.
+// A hosted-matrix gap alone is an availability problem, not missing support.
+function supportStatusFor(edition, state) {
+  const installed = state.installedEditions.includes(edition);
+  const hosted = state.hosted.supported.some((entry) => entry.edition === edition);
+  if (!installed) return { supported: false, hosted };
+  return { supported: true, hosted };
+}
+
+function compareReleases(a, b) {
+  const editionDelta = Number(a.edition) - Number(b.edition);
+  if (editionDelta !== 0) return editionDelta;
+  return String(a.id).localeCompare(String(b.id));
+}
+
+// Returns the unsupported eligible releases (oldest edition first), the
+// already-supported ones, and everything skipped, so the caller can report all
+// three without re-deriving them.
+function selectBacklog({ releases, state }) {
+  const unsupported = [];
+  const supported = [];
+  const ignored = [];
+  const conflicts = [];
+  for (const raw of releases || []) {
+    const verdict = classifyRelease(raw);
+    if (verdict.status === 'ignored') {
+      ignored.push({ tag: String((raw && raw.tag_name) || '(untagged)'), reason: verdict.reason });
+      continue;
+    }
+    if (verdict.status === 'conflict') {
+      conflicts.push({ tag: String((raw && raw.tag_name) || '(untagged)'), reason: verdict.reason });
+      continue;
+    }
+    const status = supportStatusFor(verdict.release.edition, state);
+    const entry = { ...verdict.release, hostedAvailable: status.hosted };
+    if (status.supported) supported.push(entry);
+    else unsupported.push(entry);
+  }
+  unsupported.sort(compareReleases);
+  supported.sort(compareReleases);
+  return { unsupported, supported, ignored, conflicts };
+}
+
+// The nearest already-approved release below the candidate. Assessment must
+// diff against this, not against the previous upstream release, because the
+// upstream notes are cumulative.
+function findSupportBaselineRelease(candidate, supportedReleases) {
+  const older = supportedReleases.filter((entry) => Number(entry.edition) < Number(candidate.edition));
+  if (!older.length) return null;
+  const sameFamily = older.filter((entry) => entry.family === candidate.family);
+  const pool = sameFamily.length ? sameFamily : older;
+  return pool[pool.length - 1];
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+// One fingerprint over everything an assessment actually depends on. Cosmetic
+// upstream metadata edits must not burn another model run.
+function computeEvidenceFingerprint({ release, body, baselineRelease, state }) {
+  const canonical = JSON.stringify({
+    release: { id: release.id, tag: release.tag, version: release.version, asset: release.asset },
+    body: sha256(String(body || '')),
+    baseline: baselineRelease ? { id: baselineRelease.id, tag: baselineRelease.tag } : null,
+    support: {
+      installed: [...state.installedEditions].sort(),
+      hosted: state.hosted.supported.map((entry) => entry.version).sort(),
+      hostedDefault: state.hosted.default,
+      baseline: state.baseline,
+    },
+  });
+  return sha256(canonical);
+}
+
+function markerPrefix(releaseId) {
+  return `<!-- ${MARKER_NAME} id=${releaseId} `;
+}
+
+function stateMarkerPrefix(releaseId) {
+  return `<!-- ${STATE_MARKER_NAME} id=${releaseId} `;
+}
+
+function isBotAuthored(entity, botLogin) {
+  return Boolean(entity && entity.user && entity.user.login === botLogin);
+}
+
+function renderTrackingIssueTitle(release) {
+  return `GDK ${release.version} (${release.releaseLabel}): assess addon support`;
+}
+
+function renderTrackingIssueBody({ release, baselineRelease, state, runUrl }) {
+  const lines = [
+    `${markerPrefix(release.id)}tag=${release.tag} version=${release.version} edition=${release.edition} -->`,
+    `## Microsoft GDK ${release.version} — support assessment`,
+    '',
+    '> [!NOTE]',
+    '> Opened automatically by the GDK release watcher. Support is **not** claimed by this issue;',
+    '> it tracks the assessment of what this repository needs in order to support the release.',
+    '',
+    '| Field | Value |',
+    '| --- | --- |',
+    `| Upstream release | [${release.name}](${release.url}) |`,
+    `| Tag | \`${release.tag}\` |`,
+    `| Port version | \`${release.version}\` |`,
+    `| Edition | \`${release.edition}\` |`,
+    `| SDK archive | \`${release.asset}\` |`,
+    `| Published | ${release.publishedAt || 'unknown'} |`,
+    `| Comparison baseline | ${baselineRelease ? `\`${baselineRelease.version}\` (edition \`${baselineRelease.edition}\`)` : '_none below this edition — cross-family baseline needed_'} |`,
+    `| Installed allowlist | \`${state.installedEditions.join(';')}\` |`,
+    `| Hosted matrix default | \`${state.hosted.default}\` |`,
+    '',
+    '### Status',
+    '',
+    '**Awaiting assessment.** No classification has been made yet.',
+    '',
+    '### What happens next',
+    '',
+    '1. The watcher dispatches the read-only assessor for this release.',
+    '2. The assessor posts a report comment classifying the release as',
+    '   `changes_required`, `tests_only`, or `needs_review`.',
+    '3. A `tests_only` result additionally opens a **draft** pull request that proposes the',
+    '   support-list edits. The draft is a proposal pending local validation, not approved support.',
+    '',
+    'Closing this issue tells the watcher the release was handled; it is never reopened automatically.',
+    '',
+    `<sub>Watcher run: ${runUrl}</sub>`,
+    '',
+  ];
+  return lines.join('\n');
+}
+
+function renderStateComment({ releaseId, state }) {
+  if (!ASSESSMENT_STATUSES.includes(state.status)) {
+    throw new WatchError(`Unknown assessment status: ${state.status}`);
+  }
+  const payload = { ...state, release: releaseId };
+  return [
+    `${stateMarkerPrefix(releaseId)}status=${state.status} -->`,
+    `**Watcher state:** \`${state.status}\`${state.note ? ` — ${state.note}` : ''}`,
+    '',
+    '<details><summary>Machine-readable state</summary>',
+    '',
+    '```json',
+    JSON.stringify(payload, null, 2),
+    '```',
+    '',
+    '</details>',
+    '',
+  ].join('\n');
+}
+
+function parseStateComment(body) {
+  const text = String(body || '');
+  if (!text.includes(`<!-- ${STATE_MARKER_NAME} `)) return null;
+  const match = /```json\n([\s\S]*?)\n```/.exec(text);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1]);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function latestState(comments, releaseId, botLogin) {
+  const prefix = stateMarkerPrefix(releaseId);
+  for (let i = comments.length - 1; i >= 0; i -= 1) {
+    const comment = comments[i];
+    if (!isBotAuthored(comment, botLogin)) continue;
+    if (typeof comment.body !== 'string' || !comment.body.startsWith(prefix)) continue;
+    const parsed = parseStateComment(comment.body);
+    if (parsed) return { state: parsed, comment };
+  }
+  return null;
+}
+
+async function listUpstreamReleases(github, core) {
+  const releases = [];
+  for (let page = 1; page <= LIMITS.maxReleasePages; page += 1) {
+    const { data } = await github.rest.repos.listReleases({
+      owner: UPSTREAM_OWNER,
+      repo: UPSTREAM_REPO,
+      per_page: LIMITS.releasesPerPage,
+      page,
+    });
+    if (!Array.isArray(data)) throw new WatchError('Upstream release listing returned an unexpected payload.');
+    releases.push(...data);
+    if (data.length < LIMITS.releasesPerPage) return releases;
+  }
+  // The list is not ordered by version, so a truncated listing can hide a newer
+  // release entirely. Say so rather than reporting a confidently empty backlog.
+  if (core && typeof core.warning === 'function') {
+    core.warning(`Upstream release listing hit the ${LIMITS.maxReleasePages}-page cap; older releases were not inspected.`);
+  }
+  return releases;
+}
+
+// Bot-owned tracking issues are the durable queue. Caches and artifacts expire;
+// a version watermark cannot express "this one failed" or "a human closed it".
+async function listTrackingIssues({ github, owner, repo, botLogin }) {
+  const issues = await github.paginate(github.rest.issues.listForRepo, {
+    owner,
+    repo,
+    state: 'all',
+    labels: TRACKING_LABEL,
+    per_page: 100,
+  });
+  const records = new Map();
+  for (const issue of issues) {
+    if (issue.pull_request) continue;
+    if (!isBotAuthored(issue, botLogin)) continue;
+    const match = new RegExp(`<!-- ${MARKER_NAME} id=(\\d+) `).exec(String(issue.body || ''));
+    if (!match) continue;
+    const releaseId = match[1];
+    const existing = records.get(releaseId);
+    if (!existing || issue.number < existing.number) records.set(releaseId, issue);
+  }
+  return records;
+}
+
+function readWatchInputs(env) {
+  const raw = env.GDK_WATCH_INPUTS ? safeParse(env.GDK_WATCH_INPUTS) : {};
+  const inputs = raw && typeof raw === 'object' ? raw : {};
+  const tag = String(inputs.release_tag || '').trim();
+  if (tag && !TAG_PATTERN.test(tag)) throw new WatchError(`release_tag ${JSON.stringify(tag)} is not a GDK release tag.`);
+  return {
+    releaseTag: tag || null,
+    retry: inputs.retry === true || inputs.retry === 'true',
+    drainBacklog: inputs.drain_backlog === true || inputs.drain_backlog === 'true',
+    preview: inputs.preview === true || inputs.preview === 'true',
+  };
+}
+
+function safeParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new WatchError('GDK_WATCH_INPUTS is not valid JSON.');
+  }
+}
+
+// Publishing is restricted to the target repository's trusted branch. Forks and
+// feature branches still run discovery, but only render a preview.
+function evaluateTrustedContext({ context, env }) {
+  const repository = `${context.repo.owner}/${context.repo.repo}`;
+  const expected = env.GDK_WATCH_TARGET_REPO || TARGET_REPO;
+  const ref = env.GITHUB_REF || '';
+  if (repository !== expected) return { trusted: false, reason: `repository ${repository} is not ${expected}` };
+  if (ref !== TRUSTED_REF) return { trusted: false, reason: `ref ${ref || '(unset)'} is not ${TRUSTED_REF}` };
+  return { trusted: true };
+}
+
+async function ensureTrackingIssue({ github, core, owner, repo, release, baselineRelease, state, runUrl, existing, publish }) {
+  if (existing) return { issue: existing, created: false };
+  if (!publish) {
+    core.info(`Preview: would open a tracking issue for GDK ${release.version}.`);
+    return { issue: null, created: false };
+  }
+  const { data } = await github.rest.issues.create({
+    owner,
+    repo,
+    title: renderTrackingIssueTitle(release),
+    body: renderTrackingIssueBody({ release, baselineRelease, state, runUrl }),
+    labels: [TRACKING_LABEL],
+  });
+  core.notice(`Opened GDK ${release.version} tracking issue: ${data.html_url}`);
+  return { issue: data, created: true };
+}
+
+// A release is ready for another model run when it has never been assessed, when
+// evidence changed since the last assessment, or when a human explicitly asked
+// for a retry. A permanently failing item must not starve untouched releases, so
+// failures are ordered behind never-attempted work rather than blocking it.
+function assessmentDecision({ record, fingerprint, retry }) {
+  if (!record) return { dispatch: true, reason: 'no tracking issue yet', priority: 0 };
+  if (record.issue.state === 'closed') return { dispatch: false, reason: 'tracking issue is closed' };
+  const state = record.state;
+  if (!state) return { dispatch: true, reason: 'tracking issue has no recorded state', priority: 0 };
+  if (retry) return { dispatch: true, reason: 'explicit retry requested', priority: 0 };
+  if (state.status === 'assessment-dispatched') {
+    return { dispatch: false, reason: `an assessment is already in flight (run ${state.runId || 'unknown'})` };
+  }
+  if (state.status === 'assessment-failed') {
+    return { dispatch: true, reason: 'previous assessment failed', priority: 2 };
+  }
+  if (state.fingerprint && state.fingerprint !== fingerprint) {
+    return { dispatch: true, reason: 'upstream or support evidence changed since the last assessment', priority: 1 };
+  }
+  return { dispatch: false, reason: `already assessed as ${state.status}` };
+}
+
+async function loadRecords({ github, owner, repo, botLogin, backlog }) {
+  const issues = await listTrackingIssues({ github, owner, repo, botLogin });
+  const records = new Map();
+  for (const release of backlog) {
+    const issue = issues.get(String(release.id));
+    if (!issue) continue;
+    const comments = await github.paginate(github.rest.issues.listComments, {
+      owner,
+      repo,
+      issue_number: issue.number,
+      per_page: 100,
+    });
+    const found = latestState(comments, release.id, botLogin);
+    records.set(String(release.id), { issue, state: found ? found.state : null });
+  }
+  return records;
+}
+
+async function dispatchAssessment({ github, core, owner, repo, release, issue, fingerprint, env }) {
+  const ref = (env.GITHUB_REF_NAME || 'main').trim();
+  await github.rest.actions.createWorkflowDispatch({
+    owner,
+    repo,
+    workflow_id: ASSESS_WORKFLOW,
+    ref,
+    inputs: {
+      release_id: String(release.id),
+      release_tag: release.tag,
+      issue_number: String(issue.number),
+      evidence_fingerprint: fingerprint,
+    },
+  });
+  core.notice(`Dispatched the assessor for GDK ${release.version} (issue #${issue.number}).`);
+}
+
+function renderSummary({ backlog, decisions, trusted, preview }) {
+  const lines = [
+    `- Unsupported releases: ${backlog.unsupported.length}`,
+    `- Already supported: ${backlog.supported.length}`,
+    `- Skipped: ${backlog.ignored.length}`,
+    `- Metadata conflicts: ${backlog.conflicts.length}`,
+    `- Publishing: ${trusted && !preview ? 'enabled' : 'preview only'}`,
+    '',
+  ];
+  if (backlog.unsupported.length) {
+    lines.push('| Release | Edition | Hosted port | Action |', '| --- | --- | --- | --- |');
+    for (const release of backlog.unsupported) {
+      const decision = decisions.get(String(release.id));
+      lines.push(
+        `| \`${release.tag}\` | \`${release.edition}\` | ${release.hostedAvailable ? 'available' : 'not published'} | ${decision ? decision.reason : 'pending'} |`,
+      );
+    }
+    lines.push('');
+  }
+  if (backlog.conflicts.length) {
+    lines.push('### Metadata conflicts', '');
+    for (const conflict of backlog.conflicts) lines.push(`- \`${conflict.tag}\`: ${conflict.reason}`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+async function runWatch({ github, context, core, env, root }) {
+  const { owner, repo } = context.repo;
+  const botLogin = env.GDK_WATCH_BOT_LOGIN || DEFAULT_BOT_LOGIN;
+  const inputs = readWatchInputs(env);
+  const trust = evaluateTrustedContext({ context, env });
+  const preview = inputs.preview || !trust.trusted;
+  if (!trust.trusted) core.notice(`Preview only: ${trust.reason}.`);
+
+  const state = readSupportState(root);
+  const releases = await listUpstreamReleases(github, core);
+  const backlog = selectBacklog({ releases, state });
+  for (const conflict of backlog.conflicts) {
+    core.warning(`Upstream release ${conflict.tag} has inconsistent metadata: ${conflict.reason}`);
+  }
+
+  let queue = backlog.unsupported;
+  if (inputs.releaseTag) {
+    queue = queue.filter((release) => release.tag === inputs.releaseTag);
+    if (!queue.length) {
+      throw new WatchError(`Release ${inputs.releaseTag} is not an unsupported eligible GDK release.`);
+    }
+  }
+
+  const records = await loadRecords({ github, owner, repo, botLogin, backlog: queue });
+  const runUrl = `${env.GITHUB_SERVER_URL || 'https://github.com'}/${owner}/${repo}/actions/runs/${env.GITHUB_RUN_ID}`;
+  const decisions = new Map();
+  const ready = [];
+
+  for (const release of queue) {
+    const upstream = releases.find((entry) => entry.id === release.id);
+    const baselineRelease = findSupportBaselineRelease(release, backlog.supported);
+    const fingerprint = computeEvidenceFingerprint({
+      release,
+      body: upstream ? upstream.body : '',
+      baselineRelease,
+      state,
+    });
+    const existing = records.get(String(release.id));
+    const ensured = await ensureTrackingIssue({
+      github,
+      core,
+      owner,
+      repo,
+      release,
+      baselineRelease,
+      state,
+      runUrl,
+      existing: existing ? existing.issue : null,
+      publish: !preview,
+    });
+    const record = ensured.issue ? { issue: ensured.issue, state: existing ? existing.state : null } : null;
+    const decision = assessmentDecision({ record, fingerprint, retry: inputs.retry });
+    decisions.set(String(release.id), decision);
+    if (decision.dispatch && record) {
+      ready.push({ release, issue: record.issue, fingerprint, priority: decision.priority });
+    }
+  }
+
+  ready.sort((a, b) => a.priority - b.priority || compareReleases(a.release, b.release));
+  const limit = inputs.drainBacklog ? ready.length : LIMITS.maxQueuedPerRun;
+  const selected = ready.slice(0, limit);
+
+  if (!preview) {
+    for (const item of selected) {
+      await github.rest.issues.createComment({
+        owner,
+        repo,
+        issue_number: item.issue.number,
+        body: renderStateComment({
+          releaseId: item.release.id,
+          state: {
+            status: 'assessment-dispatched',
+            fingerprint: item.fingerprint,
+            runId: env.GITHUB_RUN_ID || null,
+            runUrl,
+            at: new Date().toISOString(),
+          },
+        }),
+      });
+      await dispatchAssessment({ github, core, owner, repo, release: item.release, issue: item.issue, fingerprint: item.fingerprint, env });
+    }
+  } else if (selected.length) {
+    core.info(`Preview: would dispatch ${selected.length} assessment(s).`);
+  }
+
+  const summary = renderSummary({ backlog, decisions, trusted: trust.trusted, preview });
+  if (core.summary) await core.summary.addHeading('GDK release watcher', 2).addRaw(`\n\n${summary}\n`).write();
+  core.setOutput('unsupported', String(backlog.unsupported.length));
+  core.setOutput('dispatched', String(preview ? 0 : selected.length));
+  return { backlog, decisions, dispatched: preview ? [] : selected, preview, summary };
+}
+
+module.exports = {
+  ASSESSMENT_STATUSES,
+  ASSESS_WORKFLOW,
+  DEFAULT_BOT_LOGIN,
+  LIMITS,
+  MARKER_NAME,
+  MINIMUM_EDITION,
+  STATE_MARKER_NAME,
+  TARGET_REPO,
+  TRACKING_LABEL,
+  TRUSTED_REF,
+  UPSTREAM_OWNER,
+  UPSTREAM_REPO,
+  WatchError,
+  assessmentDecision,
+  classifyRelease,
+  compareReleases,
+  computeEvidenceFingerprint,
+  editionOf,
+  evaluateTrustedContext,
+  findSupportBaselineRelease,
+  latestState,
+  listTrackingIssues,
+  listUpstreamReleases,
+  markerPrefix,
+  parseGdkTag,
+  parseHostedMatrix,
+  parseRegistryBaseline,
+  parseStateComment,
+  parseSupportedEditions,
+  readSupportState,
+  readWatchInputs,
+  renderStateComment,
+  renderTrackingIssueBody,
+  renderTrackingIssueTitle,
+  runWatch,
+  selectBacklog,
+  stateMarkerPrefix,
+  statusOf,
+  supportStatusFor,
+};

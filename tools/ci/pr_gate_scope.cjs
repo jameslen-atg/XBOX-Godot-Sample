@@ -487,6 +487,18 @@ const RULES = [
     },
   },
 
+  // GDK release watch: covered by the GDK Release Watch Checks workflow, which
+  // runs the helper suites and the gh-aw compile-drift check on the same paths.
+  {
+    name: 'gdk release watch helpers / workflows',
+    kind: 'specific',
+    test: (p) =>
+      /^tools\/ci\/gdk_(release|support)_[^/]*$/.test(p) ||
+      /^tools\/ci\/tests\/gdk_[^/]*$/.test(p) ||
+      /^\.github\/workflows\/gdk-release-[^/]*$/.test(p),
+    apply: () => {},
+  },
+
   // Scheduled live coverage keeps its own schedule; PRs only lint it.
   {
     name: 'nightly live workflow',

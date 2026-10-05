@@ -1,0 +1,644 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const test = require('node:test');
+
+const watch = require('../gdk_release_watch.cjs');
+
+const OWNER = 'microsoft';
+const REPO = 'XBOX-Godot-Sample';
+const BOT = watch.DEFAULT_BOT_LOGIN;
+
+function tempDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'gdk-release-watch-test-'));
+}
+
+function makeSupportFixture({
+  editions = ['251001', '251002', '260400'],
+  hostedDefault = '2604.0.7822',
+  hosted = [
+    { version: '2604.0.7822', edition: '260400', release: 'April 2026' },
+    { version: '2510.2.6247', edition: '251002', release: 'October 2025 Update 2' },
+    { version: '2510.1.6224', edition: '251001', release: 'October 2025 Update 1' },
+  ],
+  baseline = '0'.repeat(40),
+} = {}) {
+  const root = tempDir();
+  fs.mkdirSync(path.join(root, 'cmake'), { recursive: true });
+  fs.mkdirSync(path.join(root, '.github'), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, 'cmake', 'GDKDependencies.cmake'),
+    `# fixture\nset(GDK_SUPPORTED_VERSIONS "${editions.join(';')}"\n    CACHE STRING "Supported editions")\n`,
+  );
+  fs.writeFileSync(
+    path.join(root, '.github', 'gdk-versions.json'),
+    `${JSON.stringify({ default: hostedDefault, supported: hosted }, null, 2)}\n`,
+  );
+  fs.writeFileSync(
+    path.join(root, 'vcpkg-configuration.json'),
+    `${JSON.stringify({ 'default-registry': { kind: 'git', baseline } }, null, 2)}\n`,
+  );
+  return root;
+}
+
+function makeRelease({
+  id = 1,
+  tag = 'April-2026-Update-1-v2604.1.7839',
+  name = 'Microsoft GDK April 2026 Update 1',
+  asset = 'GDK_2604.1.7839.zip',
+  assets,
+  body = 'Release notes.',
+  draft = false,
+  prerelease = false,
+  publishedAt = '2026-05-01T00:00:00Z',
+} = {}) {
+  return {
+    id,
+    tag_name: tag,
+    name,
+    draft,
+    prerelease,
+    body,
+    published_at: publishedAt,
+    html_url: `https://github.com/microsoft/GDK/releases/tag/${tag}`,
+    assets: assets || (asset ? [{ name: asset }] : []),
+  };
+}
+
+function eligible(release) {
+  const verdict = watch.classifyRelease(release);
+  assert.equal(verdict.status, 'eligible', verdict.reason);
+  return verdict.release;
+}
+
+function fakeCore() {
+  const core = {
+    outputs: {},
+    infos: [],
+    notices: [],
+    warnings: [],
+    summaryText: '',
+    setOutput: (name, value) => {
+      core.outputs[name] = value;
+    },
+    info: (message) => core.infos.push(message),
+    notice: (message) => core.notices.push(message),
+    warning: (message) => core.warnings.push(message),
+  };
+  const summary = {
+    addHeading: (text) => {
+      core.summaryText += `# ${text}\n`;
+      return summary;
+    },
+    addRaw: (text) => {
+      core.summaryText += text;
+      return summary;
+    },
+    write: async () => summary,
+  };
+  core.summary = summary;
+  return core;
+}
+
+function fakeGithub({ releases = [], issues = [], comments = {} } = {}) {
+  const state = {
+    releases: releases.slice(),
+    issues: issues.slice(),
+    comments: { ...comments },
+    createdIssues: [],
+    createdComments: [],
+    dispatches: [],
+    nextIssue: 100,
+    nextComment: 9000,
+  };
+  return {
+    state,
+    paginate: async (fn, params) => (await fn(params)).data,
+    rest: {
+      repos: {
+        listReleases: async ({ page }) => ({ data: page === 1 ? state.releases : [] }),
+      },
+      issues: {
+        listForRepo: async () => ({ data: state.issues.slice() }),
+        listComments: async ({ issue_number: number }) => ({ data: (state.comments[number] || []).slice() }),
+        create: async ({ title, body, labels }) => {
+          state.nextIssue += 1;
+          const issue = {
+            number: state.nextIssue,
+            title,
+            body,
+            labels: (labels || []).map((name) => ({ name })),
+            state: 'open',
+            user: { login: BOT },
+            html_url: `https://github.com/${OWNER}/${REPO}/issues/${state.nextIssue}`,
+          };
+          state.issues.push(issue);
+          state.createdIssues.push(issue);
+          return { data: issue };
+        },
+        createComment: async ({ issue_number: number, body }) => {
+          state.nextComment += 1;
+          const comment = {
+            id: state.nextComment,
+            body,
+            user: { login: BOT },
+            html_url: `https://example.test/c/${state.nextComment}`,
+          };
+          state.comments[number] = [...(state.comments[number] || []), comment];
+          state.createdComments.push({ issue: number, body });
+          return { data: comment };
+        },
+      },
+      actions: {
+        createWorkflowDispatch: async (params) => {
+          state.dispatches.push(params);
+          return { data: {} };
+        },
+      },
+    },
+  };
+}
+
+function trackingIssue({ number = 100, releaseId = 1, release = eligible(makeRelease()), issueState = 'open' } = {}) {
+  return {
+    number,
+    title: watch.renderTrackingIssueTitle(release),
+    body: watch.renderTrackingIssueBody({
+      release,
+      baselineRelease: null,
+      state: watch.readSupportState(makeSupportFixture()),
+      runUrl: 'https://example.test/run',
+    }).replace(/id=\d+/, `id=${releaseId}`),
+    state: issueState,
+    user: { login: BOT },
+    labels: [{ name: watch.TRACKING_LABEL }],
+    html_url: `https://github.com/${OWNER}/${REPO}/issues/${number}`,
+  };
+}
+
+const CONTEXT = { repo: { owner: OWNER, repo: REPO } };
+const TRUSTED_ENV = {
+  GITHUB_REF: watch.TRUSTED_REF,
+  GITHUB_RUN_ID: '555',
+  GITHUB_SERVER_URL: 'https://github.com',
+  GDK_WATCH_TARGET_REPO: `${OWNER}/${REPO}`,
+};
+
+// ---------------------------------------------------------------------------
+// Tag parsing
+// ---------------------------------------------------------------------------
+
+test('parseGdkTag reads a base release and an update release', () => {
+  assert.deepEqual(watch.parseGdkTag('April-2026-v2604.0.7822'), {
+    version: '2604.0.7822',
+    family: 2604,
+    update: 0,
+    build: 7822,
+    edition: '260400',
+    releaseLabel: 'April 2026',
+  });
+  const update = watch.parseGdkTag('April-2026-Update-5-v2604.5.7903');
+  assert.equal(update.edition, '260405');
+  assert.equal(update.releaseLabel, 'April 2026 Update 5');
+});
+
+test('parseGdkTag ignores tags that are not versioned GDK releases', () => {
+  for (const tag of ['October_2024_Update_2', 'RIT-2609-v0.0.13-preview', '', 'v1.2.3', 'Smarch-2026-v2613.0.1']) {
+    assert.equal(watch.parseGdkTag(tag), null, tag);
+  }
+});
+
+test('parseGdkTag reports self-inconsistent tags instead of guessing', () => {
+  assert.match(watch.parseGdkTag('April-2026-v2510.0.6194').conflict, /carries version family 2510/);
+  assert.match(watch.parseGdkTag('April-2026-Update-2-v2604.3.7874').conflict, /names update 2 but carries version update 3/);
+});
+
+// ---------------------------------------------------------------------------
+// Release classification
+// ---------------------------------------------------------------------------
+
+test('classifyRelease accepts a well-formed public GDK release', () => {
+  const release = eligible(makeRelease({ id: 42 }));
+  assert.equal(release.id, 42);
+  assert.equal(release.version, '2604.1.7839');
+  assert.equal(release.edition, '260401');
+  assert.equal(release.asset, 'GDK_2604.1.7839.zip');
+  assert.equal(release.releaseLabel, 'April 2026 Update 1');
+});
+
+test('classifyRelease ignores drafts, pre-releases and editions below the minimum', () => {
+  assert.equal(watch.classifyRelease(makeRelease({ draft: true })).status, 'ignored');
+  assert.equal(watch.classifyRelease(makeRelease({ prerelease: true })).status, 'ignored');
+  const old = watch.classifyRelease(
+    makeRelease({ tag: 'June-2025-v2506.0.5000', name: 'Microsoft GDK June 2025', asset: 'GDK_2506.0.5000.zip' }),
+  );
+  assert.equal(old.status, 'ignored');
+  assert.match(old.reason, /predates the minimum/);
+});
+
+test('classifyRelease flags metadata conflicts rather than dropping the release', () => {
+  const cases = [
+    [makeRelease({ tag: '' }), /no tag/],
+    [makeRelease({ name: 'Some other SDK' }), /does not identify a GDK release/],
+    [makeRelease({ asset: null }), /publishes no GDK_/],
+    [makeRelease({ assets: [{ name: 'GDK_2604.1.7839.zip' }, { name: 'GDK_2604.2.7850.zip' }] }), /publishes 2 SDK archives/],
+    [makeRelease({ asset: 'GDK_2604.2.7850.zip' }), /disagrees with asset/],
+  ];
+  for (const [release, pattern] of cases) {
+    const verdict = watch.classifyRelease(release);
+    assert.equal(verdict.status, 'conflict', release.tag_name);
+    assert.match(verdict.reason, pattern);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Support configuration
+// ---------------------------------------------------------------------------
+
+test('readSupportState reads both independent support lists', () => {
+  const state = watch.readSupportState(makeSupportFixture());
+  assert.deepEqual(state.installedEditions, ['251001', '251002', '260400']);
+  assert.equal(state.hosted.default, '2604.0.7822');
+  assert.equal(state.hosted.supported.length, 3);
+  assert.equal(state.baseline, '0'.repeat(40));
+  assert.equal(state.minimumEdition, String(watch.MINIMUM_EDITION));
+});
+
+test('readSupportState rejects malformed support configuration', () => {
+  assert.throws(
+    () => watch.readSupportState(makeSupportFixture({ editions: ['2604'] })),
+    /non-edition entry/,
+  );
+  assert.throws(
+    () => watch.parseHostedMatrix({ default: '2604.1.7839', supported: [{ version: '2604.1.7839', edition: '260400' }] }),
+    /expected 260401/,
+  );
+  assert.throws(
+    () => watch.parseHostedMatrix({ default: '9999.9.9', supported: [{ version: '2604.1.7839', edition: '260401' }] }),
+    /is not in "supported"/,
+  );
+  assert.throws(() => watch.parseRegistryBaseline({ 'default-registry': { baseline: 'abc' } }), /40-character/);
+});
+
+test('supportStatusFor treats the installed allowlist as the definition of support', () => {
+  const state = watch.readSupportState(makeSupportFixture());
+  assert.deepEqual(watch.supportStatusFor('260400', state), { supported: true, hosted: true });
+  assert.deepEqual(watch.supportStatusFor('251003', state), { supported: false, hosted: false });
+  // Present in the hosted matrix but absent from the installed allowlist.
+  const partial = watch.readSupportState(makeSupportFixture({ editions: ['251001'] }));
+  assert.deepEqual(watch.supportStatusFor('260400', partial), { supported: false, hosted: true });
+});
+
+// ---------------------------------------------------------------------------
+// Backlog selection
+// ---------------------------------------------------------------------------
+
+test('selectBacklog partitions releases and orders unsupported ones oldest first', () => {
+  const state = watch.readSupportState(makeSupportFixture());
+  const releases = [
+    makeRelease({ id: 5, tag: 'April-2026-Update-5-v2604.5.7903', name: 'GDK April 2026 Update 5', asset: 'GDK_2604.5.7903.zip' }),
+    makeRelease({ id: 1, tag: 'April-2026-v2604.0.7822', name: 'GDK April 2026', asset: 'GDK_2604.0.7822.zip' }),
+    makeRelease({ id: 4, tag: 'October-2025-Update-4-v2510.4.6300', name: 'GDK October 2025 Update 4', asset: 'GDK_2510.4.6300.zip' }),
+    makeRelease({ id: 9, tag: 'October_2024_Update_2', name: 'GDK October 2024 Update 2', asset: null }),
+    makeRelease({ id: 10, tag: 'April-2026-Update-2-v2604.3.7874', name: 'GDK April 2026 Update 2', asset: 'GDK_2604.3.7874.zip' }),
+  ];
+  const backlog = watch.selectBacklog({ releases, state });
+  assert.deepEqual(backlog.unsupported.map((entry) => entry.edition), ['260405']);
+  assert.deepEqual(backlog.supported.map((entry) => entry.edition), ['260400']);
+  // The October 2025 family is below the minimum edition and is never queued.
+  assert.deepEqual(backlog.ignored.map((entry) => entry.tag), [
+    'October-2025-Update-4-v2510.4.6300',
+    'October_2024_Update_2',
+  ]);
+  assert.equal(backlog.conflicts.length, 1);
+});
+
+test('findSupportBaselineRelease prefers the newest supported release in the same family', () => {
+  const supported = [
+    eligible(makeRelease({ id: 1, tag: 'April-2026-v2604.0.7822', name: 'GDK April 2026', asset: 'GDK_2604.0.7822.zip' })),
+    eligible(makeRelease({ id: 2, tag: 'April-2026-Update-1-v2604.1.7839', name: 'GDK April 2026 Update 1', asset: 'GDK_2604.1.7839.zip' })),
+    eligible(makeRelease({ id: 3, tag: 'October-2026-v2610.0.8000', name: 'GDK October 2026', asset: 'GDK_2610.0.8000.zip' })),
+  ];
+  const candidate = eligible(
+    makeRelease({ id: 4, tag: 'April-2026-Update-5-v2604.5.7903', name: 'GDK April 2026 Update 5', asset: 'GDK_2604.5.7903.zip' }),
+  );
+  assert.equal(watch.findSupportBaselineRelease(candidate, supported).version, '2604.1.7839');
+
+  // No same-family predecessor: fall back to the newest older release.
+  const crossFamily = eligible(
+    makeRelease({ id: 5, tag: 'April-2027-v2704.0.9000', name: 'GDK April 2027', asset: 'GDK_2704.0.9000.zip' }),
+  );
+  assert.equal(watch.findSupportBaselineRelease(crossFamily, supported).version, '2610.0.8000');
+
+  const oldest = eligible(
+    makeRelease({ id: 6, tag: 'April-2026-v2604.0.7822', name: 'GDK April 2026', asset: 'GDK_2604.0.7822.zip' }),
+  );
+  assert.equal(watch.findSupportBaselineRelease(oldest, []), null);
+});
+
+// ---------------------------------------------------------------------------
+// Evidence fingerprint
+// ---------------------------------------------------------------------------
+
+test('computeEvidenceFingerprint tracks evidence and ignores cosmetic metadata', () => {
+  const state = watch.readSupportState(makeSupportFixture());
+  const release = eligible(makeRelease());
+  const base = watch.computeEvidenceFingerprint({ release, body: 'notes', baselineRelease: null, state });
+
+  assert.equal(watch.computeEvidenceFingerprint({ release, body: 'notes', baselineRelease: null, state }), base);
+  assert.notEqual(watch.computeEvidenceFingerprint({ release, body: 'notes v2', baselineRelease: null, state }), base);
+
+  const renamed = { ...release, name: 'Different title', publishedAt: '2030-01-01T00:00:00Z' };
+  assert.equal(watch.computeEvidenceFingerprint({ release: renamed, body: 'notes', baselineRelease: null, state }), base);
+
+  const moved = watch.readSupportState(makeSupportFixture({ editions: ['251001'] }));
+  assert.notEqual(watch.computeEvidenceFingerprint({ release, body: 'notes', baselineRelease: null, state: moved }), base);
+});
+
+// ---------------------------------------------------------------------------
+// Assessment decisions
+// ---------------------------------------------------------------------------
+
+test('assessmentDecision queues new work and skips settled or in-flight work', () => {
+  const issue = { number: 1, state: 'open' };
+  assert.deepEqual(watch.assessmentDecision({ record: null, fingerprint: 'a' }), {
+    dispatch: true,
+    reason: 'no tracking issue yet',
+    priority: 0,
+  });
+  assert.equal(watch.assessmentDecision({ record: { issue, state: null }, fingerprint: 'a' }).priority, 0);
+  assert.equal(
+    watch.assessmentDecision({ record: { issue: { number: 1, state: 'closed' }, state: null }, fingerprint: 'a' }).dispatch,
+    false,
+  );
+  assert.equal(
+    watch.assessmentDecision({ record: { issue, state: { status: 'assessment-dispatched', runId: 7 } }, fingerprint: 'a' }).dispatch,
+    false,
+  );
+  assert.equal(
+    watch.assessmentDecision({ record: { issue, state: { status: 'tests-only', fingerprint: 'a' } }, fingerprint: 'a' }).dispatch,
+    false,
+  );
+});
+
+test('assessmentDecision orders failures behind never-attempted and changed work', () => {
+  const issue = { number: 1, state: 'open' };
+  const changed = watch.assessmentDecision({ record: { issue, state: { status: 'needs-review', fingerprint: 'old' } }, fingerprint: 'new' });
+  const failed = watch.assessmentDecision({ record: { issue, state: { status: 'assessment-failed', fingerprint: 'a' } }, fingerprint: 'a' });
+  assert.equal(changed.priority, 1);
+  assert.equal(failed.priority, 2);
+  assert.ok(failed.priority > changed.priority, 'a permanently failing item must not starve newer work');
+});
+
+test('assessmentDecision honours an explicit retry over a settled state', () => {
+  const record = { issue: { number: 1, state: 'open' }, state: { status: 'changes-required', fingerprint: 'a' } };
+  assert.equal(watch.assessmentDecision({ record, fingerprint: 'a' }).dispatch, false);
+  assert.equal(watch.assessmentDecision({ record, fingerprint: 'a', retry: true }).dispatch, true);
+});
+
+// ---------------------------------------------------------------------------
+// State comments
+// ---------------------------------------------------------------------------
+
+test('state comments round-trip through render, parse and latestState', () => {
+  const body = watch.renderStateComment({ releaseId: 7, state: { status: 'tests-only', fingerprint: 'abc', note: 'all good' } });
+  assert.ok(body.startsWith(watch.stateMarkerPrefix(7)));
+  assert.match(body, /all good/);
+  const parsed = watch.parseStateComment(body);
+  assert.equal(parsed.status, 'tests-only');
+  assert.equal(parsed.release, 7);
+
+  const comments = [
+    { body: 'unrelated', user: { login: 'human' } },
+    { body: watch.renderStateComment({ releaseId: 7, state: { status: 'assessment-failed', fingerprint: 'a' } }), user: { login: BOT } },
+    { body, user: { login: BOT } },
+  ];
+  assert.equal(watch.latestState(comments, 7, BOT).state.status, 'tests-only');
+  assert.equal(watch.latestState(comments, 8, BOT), null);
+  assert.equal(watch.latestState(comments, 7, 'other-bot'), null, 'non-bot comments must never be trusted as state');
+});
+
+test('renderStateComment rejects an unknown status', () => {
+  assert.throws(() => watch.renderStateComment({ releaseId: 1, state: { status: 'made-up' } }), /Unknown assessment status/);
+});
+
+test('renderTrackingIssueBody carries a machine-readable marker and claims no support', () => {
+  const release = eligible(makeRelease({ id: 77 }));
+  const body = watch.renderTrackingIssueBody({
+    release,
+    baselineRelease: null,
+    state: watch.readSupportState(makeSupportFixture()),
+    runUrl: 'https://example.test/run',
+  });
+  assert.ok(body.startsWith(watch.markerPrefix(77)));
+  assert.match(body, /Support is \*\*not\*\* claimed/);
+  assert.match(watch.renderTrackingIssueTitle(release), /^GDK 2604\.1\.7839 \(April 2026 Update 1\)/);
+});
+
+// ---------------------------------------------------------------------------
+// Inputs and trust
+// ---------------------------------------------------------------------------
+
+test('readWatchInputs defaults to a bounded scheduled run', () => {
+  assert.deepEqual(watch.readWatchInputs({}), { releaseTag: null, retry: false, drainBacklog: false, preview: false });
+  assert.deepEqual(
+    watch.readWatchInputs({ GDK_WATCH_INPUTS: '{"retry":"true","drain_backlog":true,"preview":"false"}' }),
+    { releaseTag: null, retry: true, drainBacklog: true, preview: false },
+  );
+});
+
+test('readWatchInputs rejects malformed JSON and non-GDK tags', () => {
+  assert.throws(() => watch.readWatchInputs({ GDK_WATCH_INPUTS: '{' }), /not valid JSON/);
+  assert.throws(() => watch.readWatchInputs({ GDK_WATCH_INPUTS: '{"release_tag":"nope"}' }), /is not a GDK release tag/);
+});
+
+test('evaluateTrustedContext only trusts the target repository default branch', () => {
+  assert.deepEqual(watch.evaluateTrustedContext({ context: CONTEXT, env: TRUSTED_ENV }), { trusted: true });
+  assert.match(
+    watch.evaluateTrustedContext({ context: { repo: { owner: 'fork', repo: REPO } }, env: TRUSTED_ENV }).reason,
+    /is not microsoft\/XBOX-Godot-Sample/,
+  );
+  assert.match(
+    watch.evaluateTrustedContext({ context: CONTEXT, env: { ...TRUSTED_ENV, GITHUB_REF: 'refs/heads/feature' } }).reason,
+    /is not refs\/heads\/main/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// runWatch
+// ---------------------------------------------------------------------------
+
+function watchReleases() {
+  return [
+    makeRelease({ id: 1, tag: 'April-2026-v2604.0.7822', name: 'GDK April 2026', asset: 'GDK_2604.0.7822.zip' }),
+    makeRelease({ id: 2, tag: 'April-2026-Update-1-v2604.1.7839', name: 'GDK April 2026 Update 1', asset: 'GDK_2604.1.7839.zip' }),
+    makeRelease({ id: 3, tag: 'April-2026-Update-2-v2604.2.7850', name: 'GDK April 2026 Update 2', asset: 'GDK_2604.2.7850.zip' }),
+  ];
+}
+
+test('runWatch writes nothing when the context is untrusted', async () => {
+  const github = fakeGithub({ releases: watchReleases() });
+  const core = fakeCore();
+  const result = await watch.runWatch({
+    github,
+    context: { repo: { owner: 'contributor', repo: REPO } },
+    core,
+    env: { ...TRUSTED_ENV },
+    root: makeSupportFixture(),
+  });
+  assert.equal(result.preview, true);
+  assert.deepEqual(result.dispatched, []);
+  assert.equal(github.state.createdIssues.length, 0);
+  assert.equal(github.state.createdComments.length, 0);
+  assert.equal(github.state.dispatches.length, 0);
+  assert.equal(core.outputs.unsupported, '2');
+  assert.equal(core.outputs.dispatched, '0');
+});
+
+test('runWatch preview mode is explicitly requestable on the trusted branch', async () => {
+  const github = fakeGithub({ releases: watchReleases() });
+  const result = await watch.runWatch({
+    github,
+    context: CONTEXT,
+    core: fakeCore(),
+    env: { ...TRUSTED_ENV, GDK_WATCH_INPUTS: '{"preview":true}' },
+    root: makeSupportFixture(),
+  });
+  assert.equal(result.preview, true);
+  assert.equal(github.state.createdIssues.length, 0);
+  assert.equal(github.state.dispatches.length, 0);
+});
+
+test('runWatch opens one tracking issue per release but dispatches only one assessment', async () => {
+  const github = fakeGithub({ releases: watchReleases() });
+  const core = fakeCore();
+  const result = await watch.runWatch({
+    github,
+    context: CONTEXT,
+    core,
+    env: { ...TRUSTED_ENV },
+    root: makeSupportFixture(),
+  });
+
+  assert.equal(github.state.createdIssues.length, 2, 'both unsupported releases get a durable tracking issue');
+  assert.equal(result.dispatched.length, 1, 'model runs are rate limited to one per scheduled run');
+  assert.equal(github.state.dispatches.length, 1);
+
+  const dispatch = github.state.dispatches[0];
+  assert.equal(dispatch.workflow_id, watch.ASSESS_WORKFLOW);
+  assert.equal(dispatch.ref, 'main');
+  assert.equal(dispatch.inputs.release_tag, 'April-2026-Update-1-v2604.1.7839', 'the oldest unsupported release goes first');
+  assert.match(dispatch.inputs.evidence_fingerprint, /^[0-9a-f]{64}$/);
+  assert.equal(dispatch.inputs.issue_number, String(github.state.createdIssues[0].number));
+
+  const stateComment = github.state.createdComments.find((entry) => entry.body.includes('assessment-dispatched'));
+  assert.ok(stateComment, 'the dispatch is recorded in the durable ledger before it is sent');
+  assert.equal(watch.parseStateComment(stateComment.body).fingerprint, dispatch.inputs.evidence_fingerprint);
+  assert.equal(core.outputs.dispatched, '1');
+});
+
+test('runWatch drains the whole backlog only when asked', async () => {
+  const github = fakeGithub({ releases: watchReleases() });
+  const result = await watch.runWatch({
+    github,
+    context: CONTEXT,
+    core: fakeCore(),
+    env: { ...TRUSTED_ENV, GDK_WATCH_INPUTS: '{"drain_backlog":true}' },
+    root: makeSupportFixture(),
+  });
+  assert.equal(result.dispatched.length, 2);
+  assert.equal(github.state.dispatches.length, 2);
+});
+
+test('runWatch can be pointed at a single release and rejects a supported one', async () => {
+  const releases = watchReleases();
+  const github = fakeGithub({ releases });
+  const result = await watch.runWatch({
+    github,
+    context: CONTEXT,
+    core: fakeCore(),
+    env: { ...TRUSTED_ENV, GDK_WATCH_INPUTS: '{"release_tag":"April-2026-Update-2-v2604.2.7850"}' },
+    root: makeSupportFixture(),
+  });
+  assert.equal(github.state.dispatches.length, 1);
+  assert.equal(github.state.dispatches[0].inputs.release_tag, 'April-2026-Update-2-v2604.2.7850');
+  assert.equal(result.dispatched[0].release.edition, '260402');
+
+  await assert.rejects(
+    watch.runWatch({
+      github: fakeGithub({ releases }),
+      context: CONTEXT,
+      core: fakeCore(),
+      env: { ...TRUSTED_ENV, GDK_WATCH_INPUTS: '{"release_tag":"April-2026-v2604.0.7822"}' },
+      root: makeSupportFixture(),
+    }),
+    /is not an unsupported eligible GDK release/,
+  );
+});
+
+test('runWatch reuses an existing tracking issue and respects its recorded state', async () => {
+  const release = eligible(makeRelease({ id: 2 }));
+  const issue = trackingIssue({ number: 100, releaseId: 2, release });
+  const github = fakeGithub({
+    releases: watchReleases(),
+    issues: [issue],
+    comments: {
+      100: [
+        {
+          id: 1,
+          user: { login: BOT },
+          body: watch.renderStateComment({
+            releaseId: 2,
+            state: { status: 'assessment-dispatched', fingerprint: 'whatever', runId: '1' },
+          }),
+        },
+      ],
+    },
+  });
+  const result = await watch.runWatch({
+    github,
+    context: CONTEXT,
+    core: fakeCore(),
+    env: { ...TRUSTED_ENV },
+    root: makeSupportFixture(),
+  });
+
+  assert.equal(github.state.createdIssues.length, 1, 'only the release without an issue gets a new one');
+  assert.equal(result.decisions.get('2').dispatch, false);
+  assert.match(result.decisions.get('2').reason, /already in flight/);
+  assert.ok(github.state.dispatches.every((entry) => entry.inputs.release_id !== '2'));
+});
+
+test('runWatch never reopens work a human closed', async () => {
+  const release = eligible(makeRelease({ id: 2 }));
+  const github = fakeGithub({
+    releases: watchReleases(),
+    issues: [trackingIssue({ number: 100, releaseId: 2, release, issueState: 'closed' })],
+    comments: { 100: [] },
+  });
+  const result = await watch.runWatch({
+    github,
+    context: CONTEXT,
+    core: fakeCore(),
+    env: { ...TRUSTED_ENV, GDK_WATCH_INPUTS: '{"drain_backlog":true}' },
+    root: makeSupportFixture(),
+  });
+  assert.equal(result.decisions.get('2').dispatch, false);
+  assert.match(result.decisions.get('2').reason, /closed/);
+  assert.ok(github.state.dispatches.every((entry) => entry.inputs.release_id !== '2'));
+});
+
+test('runWatch warns about upstream metadata conflicts instead of dropping them', async () => {
+  const core = fakeCore();
+  const github = fakeGithub({
+    releases: [
+      ...watchReleases(),
+      makeRelease({ id: 8, tag: 'April-2026-Update-9-v2604.9.7999', name: 'Some other SDK', asset: 'GDK_2604.9.7999.zip' }),
+    ],
+  });
+  await watch.runWatch({ github, context: CONTEXT, core, env: { ...TRUSTED_ENV }, root: makeSupportFixture() });
+  assert.ok(core.warnings.some((message) => /inconsistent metadata/.test(message)));
+});
