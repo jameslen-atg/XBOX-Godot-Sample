@@ -96,8 +96,18 @@ the retry's id and settle it with an older report. An assessor that finds a
 different attempt in flight refuses to publish and lets the retry win. Both
 terminal states preserve the queuing watcher run and record the assessor run
 separately as `assessorRunUrl`, so re-running a finished assessor recognises its
-own report instead of posting a duplicate. A manual dispatch may leave `attempt`
-empty; the assessor then derives a stable id from the evidence fingerprint.
+own report instead of posting a duplicate.
+
+Because the attempt id is the only thing that separates two dispatches over
+identical evidence, it cannot be reconstructed. Dispatching the assessor
+directly therefore requires copying the `attempt` value out of the in-flight
+state comment on the tracking issue; a run that omits it renders its staged
+preview and then refuses to post. The ledger is re-read and re-validated after
+the support-change lookup — the longest step in the publish path — so a retry
+queued during that lookup stops the older run before it posts rather than after.
+GitHub comments have no compare-and-swap, so a narrow window remains between
+that final read and the write; the six-hour staleness sweep above is what
+recovers a retry that loses it.
 
 ### Manual dispatch
 

@@ -24,8 +24,9 @@ on:
         type: string
       attempt:
         description: >-
-          Watcher run id that queued this attempt. Leave empty for a manual
-          dispatch; the assessor then derives a stable id from the evidence.
+          Attempt id that queued this release. Copy the `attempt` value from the
+          in-flight state comment on the tracking issue. Required to post; a
+          staged preview may leave it empty.
         required: false
         type: string
 permissions:

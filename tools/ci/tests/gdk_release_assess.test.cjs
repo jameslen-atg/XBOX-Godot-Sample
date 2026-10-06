@@ -563,7 +563,7 @@ test('the attempt id comes from dispatch inputs, not from the ledger', () => {
       }),
     }),
   );
-  assert.equal(manual.attempt, `fingerprint-${FINGERPRINT}`);
+  assert.equal(manual.attempt, null);
 
   const reportFor = (attempt) => ({
     body: `<!-- xbox-godot-gdk-release-assessment id=${RELEASE.id} sha=${'a'.repeat(40)} attempt=${attempt} -->\nbody`,
@@ -695,6 +695,66 @@ test('an overlapping retry is not settled by the slower run it overtook', async 
   // report as 777's result, and must not consume 777's attempt key.
   const args = publishArgs(t, {
     comments: [stateComment('assessment-dispatched', { runId: 777, attempt: '777' })],
+  });
+  await assert.rejects(assess.publishAssessment(args), /Attempt `777` is now in flight/);
+  assert.equal(args.github.state.created.length, 0);
+});
+
+test('a rerun of an already-posted attempt leaves a newer queued attempt alone', async (t) => {
+  // 555 posted its report and died before writing the terminal state; the
+  // watcher then queued retry 777. Re-running 555 must recognise its own
+  // report, but repairing the ledger here would settle 777 with 555's result
+  // and then block 777 from publishing at all.
+  const existing = {
+    id: 9,
+    user: { login: BOT },
+    html_url: 'https://example.test/comment/9',
+    body: `<!-- xbox-godot-gdk-release-assessment id=${RELEASE.id} sha=${SHA} attempt=555 -->\n## existing`,
+  };
+  const args = publishArgs(t, {
+    comments: [stateComment('assessment-dispatched', { runId: 777, attempt: '777' }), existing],
+  });
+  const result = await assess.publishAssessment(args);
+  assert.deepEqual([result.posted, result.existing, result.repaired], [false, existing.html_url, false]);
+  assert.equal(args.github.state.created.length, 0);
+});
+
+test('publication requires the attempt id that queued the release', async (t) => {
+  const manual = assessEnv({
+    GDK_ASSESS_INPUTS: JSON.stringify({
+      release_id: String(RELEASE.id),
+      release_tag: RELEASE.tag,
+      issue_number: 321,
+      evidence_fingerprint: FINGERPRINT,
+    }),
+  });
+  // Deriving a substitute id from the evidence would never match the
+  // watcher-stamped id already in the ledger, so the run would burn an agent
+  // and then fail the currency check. Fail loudly, with instructions instead.
+  await assert.rejects(
+    assess.publishAssessment(publishArgs(t, { env: manual })),
+    /No assessment attempt id was supplied/,
+  );
+
+  // A staged preview never touches the ledger, so it may omit the id.
+  const staged = await assess.publishAssessment(
+    publishArgs(t, { env: { ...manual, GDK_ASSESS_MODE: 'staged' } }),
+  );
+  assert.deepEqual([staged.posted, staged.staged], [false, true]);
+});
+
+test('a retry queued during support preparation stops the run before it posts', async (t) => {
+  // The registry lookup is the longest await in the publish path. The ledger
+  // snapshot taken before it is stale by the time the report would go out.
+  const ledger = [stateComment('assessment-dispatched', { runId: 555, attempt: '555' })];
+  const args = publishArgs(t, {
+    report: baseReport({ classification: 'tests_only' }),
+    comments: ledger,
+    supportUpdate: async () => {
+      ledger.length = 0;
+      ledger.push(stateComment('assessment-dispatched', { runId: 777, attempt: '777' }));
+      return { url: 'https://example.test/pull/5', branch: 'automation/gdk-x', mode: 'task' };
+    },
   });
   await assert.rejects(assess.publishAssessment(args), /Attempt `777` is now in flight/);
   assert.equal(args.github.state.created.length, 0);

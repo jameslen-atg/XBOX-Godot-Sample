@@ -101,13 +101,14 @@ function readAssessInputs(env) {
   if (!/^\d+$/.test(releaseId)) throw new WatchError('release_id must be a numeric release id.');
   if (!Number.isInteger(issueNumber) || issueNumber <= 0) throw new WatchError('issue_number must be a positive integer.');
   if (!/^[0-9a-f]{64}$/.test(fingerprint)) throw new WatchError('evidence_fingerprint must be a sha256 hex digest.');
-  // The watcher stamps the attempt it queued. A manual dispatch has no such id,
-  // and falls back to a value derived from the evidence: two hand-dispatched
-  // runs over identical evidence are the same attempt, which is what we want.
-  const attempt = assessmentAttemptKey({
-    runId: String(inputs.attempt || '').trim() || null,
-    fingerprint,
-  });
+  // The watcher stamps the attempt it queued, and that id is the only thing
+  // that distinguishes two dispatches over identical evidence. Deriving a
+  // substitute from the fingerprint does not work: it would never match the
+  // watcher-stamped id already in the ledger, so a manual dispatch that omitted
+  // it could render a preview but never publish. Carry null instead and let the
+  // publisher demand a real id, with an error that says where to find it.
+  const rawAttempt = String(inputs.attempt || '').trim();
+  const attempt = rawAttempt ? assessmentAttemptKey({ runId: rawAttempt, fingerprint }) : null;
   return {
     releaseId,
     releaseTag: String(inputs.release_tag || '').trim() || null,
@@ -688,6 +689,30 @@ function assertDispatchIsCurrent({ state, fingerprint, attempt }) {
   return state;
 }
 
+// Re-reads the ledger mid-flight and re-applies the currency check. Used after
+// the long support-preparation await so that a retry queued in the meantime
+// stops this run before it posts, instead of after.
+async function reloadStateForAttempt({
+  github,
+  owner,
+  repo,
+  issueNumber,
+  releaseId,
+  botLogin,
+  fingerprint,
+  attempt,
+  fallback,
+}) {
+  const { comments } = await findExistingAssessment({ github, owner, repo, issueNumber, releaseId, botLogin });
+  const found = latestState(comments, releaseId, botLogin);
+  // A ledger entry that vanished between the two reads is not evidence that
+  // this run is still current, but it is also not evidence that it is stale.
+  // Fall back to the snapshot the run already validated.
+  const state = found ? found.state : fallback.state;
+  assertDispatchIsCurrent({ state, fingerprint, attempt });
+  return found || fallback;
+}
+
 async function publishAssessment({ github, context, core, env, root, agentOutputPath, contextPath, supportUpdate }) {
   const { owner, repo } = context.repo;
   const sha = env.GITHUB_SHA;
@@ -740,6 +765,16 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     };
   }
 
+  // Publication is keyed on the attempt id the watcher recorded when it queued
+  // this release. Without it there is no way to tell this run apart from a
+  // retry dispatched while it was working, so refuse rather than guess.
+  if (!inputs.attempt) {
+    throw new WatchError(
+      'No assessment attempt id was supplied. Pass the `attempt` value from the in-flight ' +
+        `state comment on issue #${inputs.issueNumber}, or let the watcher dispatch this release.`,
+    );
+  }
+
   const { reports, comments } = await findExistingAssessment({
     github,
     owner,
@@ -757,8 +792,22 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     // A run that posted its report and then died leaves the ledger in flight,
     // which the watcher reads as "permanently queued". Close it out instead of
     // returning early and stranding the release.
+    //
+    // Only when the ledger is still waiting on *this* attempt, though. If a
+    // retry was queued after this run posted, the in-flight entry belongs to
+    // that retry; stamping a terminal state here would settle the retry with
+    // this older run's result and then block the retry from publishing.
     let repaired = false;
-    if (found.state.status === 'assessment-dispatched') {
+    const inFlightIsThisAttempt =
+      found.state.status === 'assessment-dispatched' &&
+      found.state.fingerprint === inputs.fingerprint &&
+      (!found.state.attempt || found.state.attempt === attemptKey);
+    if (found.state.status === 'assessment-dispatched' && !inFlightIsThisAttempt) {
+      core.notice(
+        `Leaving the ledger alone: attempt \`${found.state.attempt || 'unknown'}\` is in flight, not \`${attemptKey}\`.`,
+      );
+    }
+    if (inFlightIsThisAttempt) {
       await github.rest.issues.createComment({
         owner,
         repo,
@@ -798,6 +847,25 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     }
   }
 
+  // Preparing a support change walks the vcpkg registry, which is by far the
+  // longest await in this function and the widest window for the watcher to
+  // queue a retry underneath us. Re-read the ledger and re-assert before the
+  // report and the terminal state go out. GitHub issue comments offer no
+  // compare-and-swap, so this narrows the race rather than closing it; the
+  // residual window is the few hundred milliseconds between this read and the
+  // writes below, and the watcher's own staleness reconciliation recovers a
+  // retry that loses it.
+  const current = await reloadStateForAttempt({
+    github,
+    owner,
+    repo,
+    issueNumber: inputs.issueNumber,
+    releaseId: inputs.releaseId,
+    botLogin,
+    fingerprint: inputs.fingerprint,
+    attempt: attemptKey,
+    fallback: found,
+  });
   const body = renderAssessmentComment({
     ...validated,
     report: validated.report,
@@ -830,8 +898,8 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
         status: STATUS_FOR_CLASSIFICATION[validated.report.classification],
         fingerprint: inputs.fingerprint,
         attempt: attemptKey,
-        runId: found.state.runId || null,
-        runUrl: found.state.runUrl || null,
+        runId: current.state.runId || null,
+        runUrl: current.state.runUrl || null,
         assessorRunUrl: runUrl,
         assessmentUrl: comment.html_url,
         pullRequest: proposal ? proposal.url || null : null,
