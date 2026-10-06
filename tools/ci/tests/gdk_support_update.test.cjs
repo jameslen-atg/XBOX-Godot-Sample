@@ -337,6 +337,39 @@ test('planSupportUpdate omits the manifest override when the baseline already re
   assert.deepEqual(plan.files.map((file) => file.path), ['cmake/GDKDependencies.cmake', '.github/gdk-versions.json']);
 });
 
+test('planSupportUpdate realigns a stale ms-gdk override even when the baseline already resolves the default', () => {
+  // A previous proposal pinned an older edition. Leaving that override in place
+  // silently resolves the *old* SDK no matter what the hosted default says.
+  const stale = VCPKG_MANIFEST_FIXTURE.replace(
+    '    "features": {',
+    '    "overrides": [ { "name": "ms-gdk", "version": "2604.1.7839" } ],\n    "features": {',
+  );
+  const plan = support.planSupportUpdate({
+    release: RELEASE,
+    sources: sources({ 'vcpkg.json': stale }),
+    registry: { available: true, baselineChange: null, baselineMsGdk: '2604.2.7850' },
+  });
+  const manifest = plan.files.find((file) => file.path === 'vcpkg.json');
+  assert.ok(manifest, 'the stale override is rewritten, not left behind');
+  assert.deepEqual(JSON.parse(manifest.content).overrides, [{ name: 'ms-gdk', version: '2604.2.7850' }]);
+});
+
+test('planSupportUpdate validates the candidate, not the newer committed default', () => {
+  // An older-family servicing release never becomes the default, so the
+  // validation instructions have to select it explicitly.
+  const older = { ...RELEASE, version: '2510.3.6300', edition: '251003', tag: 'October-2025-Update-3-v2510.3.6300' };
+  const plan = support.planSupportUpdate({
+    release: older,
+    sources: sources(),
+    registry: { available: true, baselineChange: null, baselineMsGdk: '2604.1.7839' },
+  });
+  assert.equal(plan.defaultChanged, false);
+  assert.equal(plan.candidateIsDefault, false);
+  const commands = support.validationCommands({ plan, release: older }).join('\n');
+  assert.match(commands, /2510\.3\.6300/);
+  assert.match(commands, /Restore the committed "ms-gdk" override/);
+});
+
 test('planSupportUpdate normalises CRLF sources so no line-ending churn is committed', () => {
   const crlf = Object.fromEntries(Object.entries(sources()).map(([key, value]) => [key, value.replace(/\n/g, '\r\n')]));
   const plan = support.planSupportUpdate({ release: RELEASE, sources: crlf, registry: { available: false } });

@@ -83,6 +83,27 @@ function writeAgentOutput(dir, report, { items } = {}) {
   return file;
 }
 
+// The safe-output item type is derived from the gh-aw job name, so it cannot be
+// asserted against the module's own constant: that is exactly how the original
+// `gdk_release_assessment` typo survived a green suite. Read the workflow.
+test('REPORT_ITEM_TYPE matches the safe-output job gh-aw actually emits', () => {
+  assert.equal(assess.REPORT_ITEM_TYPE, 'post_gdk_assessment');
+
+  const workflow = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'gdk-release-assess.md'), 'utf8');
+  assert.match(workflow, new RegExp(`^\\s{4}${assess.ASSESS_SAFE_OUTPUT_JOB}:`, 'm'));
+  assert.equal(assess.REPORT_ITEM_TYPE, assess.ASSESS_SAFE_OUTPUT_JOB.replace(/-/g, '_'));
+
+  const lock = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'gdk-release-assess.lock.yml'), 'utf8');
+  assert.ok(lock.includes(`'${assess.REPORT_ITEM_TYPE}'`), 'the compiled lock must gate on the same item type');
+});
+
+test('a literal post_gdk_assessment envelope is accepted', (t) => {
+  const dir = tempDir(t);
+  const file = path.join(dir, 'agent_output.json');
+  fs.writeFileSync(file, JSON.stringify({ items: [{ type: 'post_gdk_assessment', report: baseReport() }] }), 'utf8');
+  assert.equal(assess.readReportFromAgentOutput(file).classification, 'tests_only');
+});
+
 function writeContext(dir, overrides = {}) {
   const file = path.join(dir, 'context.json');
   const metadata = {
@@ -101,6 +122,7 @@ function writeContext(dir, overrides = {}) {
 function assessEnv(overrides = {}) {
   return {
     GITHUB_SHA: SHA,
+    GITHUB_REF: 'refs/heads/main',
     GITHUB_RUN_ID: '98765',
     GITHUB_SERVER_URL: 'https://github.com',
     GDK_ASSESS_MODE: 'post',
@@ -114,12 +136,12 @@ function assessEnv(overrides = {}) {
   };
 }
 
-function stateComment(status, { fingerprint = FINGERPRINT, login = BOT } = {}) {
+function stateComment(status, { fingerprint = FINGERPRINT, login = BOT, runId = 555 } = {}) {
   return {
     id: 1,
     user: { login },
     html_url: 'https://example.test/comment/1',
-    body: watch.renderStateComment({ releaseId: RELEASE.id, state: { status, fingerprint, at: '2026-05-01T00:00:00Z' } }),
+    body: watch.renderStateComment({ releaseId: RELEASE.id, state: { status, fingerprint, runId, at: '2026-05-01T00:00:00Z' } }),
   };
 }
 
@@ -415,7 +437,7 @@ test('renderAssessmentComment carries the marker, the caveat and permalinked cit
   );
   const body = render({ agentOutputPath });
 
-  assert.match(body, new RegExp(`^<!-- xbox-godot-gdk-release-assessment id=${RELEASE.id} sha=${SHA} -->`));
+  assert.match(body, new RegExp(`^<!-- xbox-godot-gdk-release-assessment id=${RELEASE.id} sha=${SHA} attempt=preview -->`));
   assert.match(body, /\*\*The SDK archive was not downloaded\*\*/);
   assert.match(body, /Classification:\*\* 🛠️ Changes required/);
   assert.ok(body.includes(`https://github.com/microsoft/XBOX-Godot-Sample/blob/${SHA}/${CITED_PATH}#L1-L3`));
@@ -479,46 +501,38 @@ test('renderAssessmentComment carries the support change however it was handed o
 // ---------------------------------------------------------------------------
 
 test('assertDispatchIsCurrent only accepts the in-flight state it was queued under', () => {
-  const comments = [stateComment('assessment-dispatched')];
   assert.equal(
-    assess.assertDispatchIsCurrent({ comments, releaseId: String(RELEASE.id), fingerprint: FINGERPRINT, botLogin: BOT }).status,
+    assess.assertDispatchIsCurrent({ state: { status: 'assessment-dispatched', fingerprint: FINGERPRINT }, fingerprint: FINGERPRINT })
+      .status,
     'assessment-dispatched',
   );
 
   assert.throws(
-    () => assess.assertDispatchIsCurrent({ comments: [], releaseId: String(RELEASE.id), fingerprint: FINGERPRINT, botLogin: BOT }),
-    /No in-flight watcher state was found/,
-  );
-  assert.throws(
-    () =>
-      assess.assertDispatchIsCurrent({
-        comments: [stateComment('tests-only')],
-        releaseId: String(RELEASE.id),
-        fingerprint: FINGERPRINT,
-        botLogin: BOT,
-      }),
+    () => assess.assertDispatchIsCurrent({ state: { status: 'tests-only', fingerprint: FINGERPRINT }, fingerprint: FINGERPRINT }),
     /is `tests-only`, not an in-flight assessment/,
   );
   assert.throws(
     () =>
       assess.assertDispatchIsCurrent({
-        comments,
-        releaseId: String(RELEASE.id),
+        state: { status: 'assessment-dispatched', fingerprint: FINGERPRINT },
         fingerprint: '2'.repeat(64),
-        botLogin: BOT,
       }),
     /A newer assessment was queued/,
   );
-  assert.throws(
-    () =>
-      assess.assertDispatchIsCurrent({
-        comments: [stateComment('assessment-dispatched', { login: 'impostor' })],
-        releaseId: String(RELEASE.id),
-        fingerprint: FINGERPRINT,
-        botLogin: BOT,
-      }),
-    /No in-flight watcher state was found/,
-  );
+});
+
+test('an attempt is keyed by the watcher run, so a retry is not treated as a duplicate', () => {
+  assert.equal(assess.attemptKeyFor({ runId: 4242 }, FINGERPRINT), '4242');
+  assert.equal(assess.attemptKeyFor({}, FINGERPRINT), `fingerprint-${FINGERPRINT}`);
+
+  const reportFor = (attempt) => ({
+    body: `<!-- xbox-godot-gdk-release-assessment id=${RELEASE.id} sha=${'a'.repeat(40)} attempt=${attempt} -->\nbody`,
+  });
+  const reports = [reportFor('4242')];
+  assert.ok(assess.findAssessmentForAttempt({ reports, attemptKey: '4242' }));
+  // A retry runs under a new watcher run id: the earlier report must not
+  // suppress it, or the release is stranded at `assessment-dispatched`.
+  assert.equal(assess.findAssessmentForAttempt({ reports, attemptKey: '9999' }), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -591,16 +605,40 @@ test('publishAssessment refuses to publish against context it did not prepare', 
   );
 });
 
-test('publishAssessment is idempotent when an assessment is already posted', async (t) => {
+test('publishAssessment is idempotent when a report for this attempt already exists', async (t) => {
   const existing = {
     id: 9,
     user: { login: BOT },
     html_url: 'https://example.test/comment/9',
-    body: `<!-- xbox-godot-gdk-release-assessment id=${RELEASE.id} sha=${SHA} -->\n## existing`,
+    body: `<!-- xbox-godot-gdk-release-assessment id=${RELEASE.id} sha=${SHA} attempt=555 -->\n## existing`,
   };
   const args = publishArgs(t, { comments: [stateComment('assessment-dispatched'), existing] });
   const result = await assess.publishAssessment(args);
   assert.deepEqual([result.posted, result.existing], [false, existing.html_url]);
+  // The ledger was still "in flight", so the terminal state is repaired rather
+  // than leaving the release stranded forever.
+  assert.equal(result.repaired, true);
+  assert.equal(args.github.state.created.length, 1);
+  assert.match(args.github.state.created[0].body, /recovered: this attempt had already posted its report/);
+});
+
+test('a report from an earlier attempt does not suppress a retry', async (t) => {
+  const stale = {
+    id: 9,
+    user: { login: BOT },
+    html_url: 'https://example.test/comment/9',
+    body: `<!-- xbox-godot-gdk-release-assessment id=${RELEASE.id} sha=${SHA} attempt=111 -->\n## stale`,
+  };
+  const args = publishArgs(t, { comments: [stateComment('assessment-dispatched', { runId: 555 }), stale] });
+  const result = await assess.publishAssessment(args);
+  assert.equal(result.posted, true);
+  assert.match(args.github.state.created[0].body, /attempt=555/);
+});
+
+test('publishAssessment stages instead of publishing from an untrusted ref', async (t) => {
+  const args = publishArgs(t, { env: { GITHUB_REF: 'refs/heads/automation/feature' } });
+  const result = await assess.publishAssessment(args);
+  assert.deepEqual([result.posted, result.staged, result.trusted], [false, true, false]);
   assert.equal(args.github.state.created.length, 0);
 });
 

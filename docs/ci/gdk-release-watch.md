@@ -70,6 +70,14 @@ status, and the fingerprint of the evidence that status was based on. If the
 upstream notes or this repository's support lists change, the fingerprint
 changes and the release is reassessed.
 
+If an assessor run dies without posting a report — a rejected dispatch, a
+crashed agent, a blocked safe output — its ledger entry would otherwise read
+`assessment-dispatched` forever. The watcher treats such an entry as in flight
+for six hours; past that it writes an `assessment-failed` state closing the dead
+attempt out and re-queues the release behind never-attempted work. A dispatch
+that fails outright is recorded the same way before the error is re-raised, so a
+failed run is always visible in both the Actions log and the tracking issue.
+
 ### Manual dispatch
 
 Run **GDK Release Watch** from the Actions tab:
@@ -121,13 +129,21 @@ The derived change edits **only** these files:
   exists in the public registry.
 - `vcpkg-configuration.json` — moves the registry baseline, when a newer one is
   needed to resolve the port.
-- `vcpkg.json` — only if the manifest needs the new version.
+- `vcpkg.json` — only if the manifest needs the new version. An `ms-gdk`
+  override left behind by an earlier proposal is always realigned, because an
+  override beats the registry baseline: a stale pin silently resolves the old
+  SDK no matter what the hosted default says.
 
 Each file is listed with its current value and its required value, so a stale
 "current" value is a visible signal that main has moved and the change must be
 re-derived rather than forced in. If the public vcpkg registry has no `ms-gdk`
 port for the release yet, the task covers the installed-GDK path only and says
 so.
+
+A servicing update from an older family never becomes the hosted default, so its
+validation commands pin the candidate through the `ms-gdk` override first and
+restore the committed default afterwards. Without that, `cmake --preset default`
+would build the newer SDK and prove nothing about the release under review.
 
 The task also tells the agent, in as many words, that it **cannot** validate the
 change — building needs Windows and an installed GDK — and that it must open the
@@ -142,6 +158,11 @@ automation ever runs them.**
 writes. `post` (the default) comments on the tracking issue. Set it to `staged`
 to render the assessment to the job summary and write nothing. The watcher's
 equivalent is the `preview` dispatch input.
+
+The assessor is independently dispatchable, so the publisher re-checks the
+trusted context the watcher checks — target repository, `refs/heads/main` — and
+stages instead of posting anywhere else. A fork or feature-branch run therefore
+produces a job summary and nothing else, whatever `GDK_ASSESS_MODE` says.
 
 `GDK_SUPPORT_PROPOSAL_MODE` controls how the support change is handed off:
 

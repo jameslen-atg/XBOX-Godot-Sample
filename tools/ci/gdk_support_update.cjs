@@ -288,6 +288,11 @@ function updateRegistryBaseline(text, baseline) {
 // block it did not write itself.
 const MS_GDK_OVERRIDE_PATTERN = /("overrides"\s*:\s*\[\s*\{\s*"name"\s*:\s*"ms-gdk"\s*,\s*"version"\s*:\s*")([^"]+)(")/;
 
+function readMsGdkOverride(text) {
+  const match = MS_GDK_OVERRIDE_PATTERN.exec(String(text));
+  return match ? match[2] : null;
+}
+
 function updateMsGdkOverride(text, version) {
   const source = String(text);
   if (/^\s*"overrides"\s*:/m.test(source)) {
@@ -347,6 +352,7 @@ function planSupportUpdate({ release, sources: rawSources, registry }) {
 
   let hostedChanged = false;
   let defaultChanged = false;
+  let defaultVersion = null;
   if (registry && registry.available) {
     const hostedJson = JSON.parse(sources['.github/gdk-versions.json']);
     const releaseField = release.releaseLabel.replace(/ Update \d+$/, '');
@@ -393,12 +399,24 @@ function planSupportUpdate({ release, sources: rawSources, registry }) {
 
     const resolved = registry.baselineMsGdk;
     const proposedDefault = hosted.json.default;
-    if (resolved && resolved !== proposedDefault) {
+    const pinned = readMsGdkOverride(sources['vcpkg.json']);
+    defaultVersion = proposedDefault;
+    const baselineNeedsOverride = !resolved || resolved !== proposedDefault;
+    // A stale override wins over the baseline, so an existing `ms-gdk` pin must
+    // be realigned even when the new baseline happens to resolve the proposed
+    // default on its own. Skipping it would leave default builds restoring the
+    // SDK a previous proposal pinned.
+    if (baselineNeedsOverride || (pinned && pinned !== proposedDefault)) {
       const manifest = updateMsGdkOverride(sources['vcpkg.json'], proposedDefault);
       if (manifest.changed) {
+        const why = baselineNeedsOverride
+          ? `the selected registry baseline resolves \`${resolved || 'nothing'}\` on its own, which is not the proposed default`
+          : `the manifest still pins \`${pinned}\`, which would override the proposed default`;
         files.push({ path: 'vcpkg.json', content: manifest.text });
         notes.push(
-          `Pins \`ms-gdk\` to \`${proposedDefault}\` via a manifest override, because the selected registry baseline resolves \`${resolved}\` on its own.`,
+          baselineNeedsOverride
+            ? `Pins \`ms-gdk\` to \`${proposedDefault}\` via a manifest override, because the selected registry baseline resolves \`${resolved}\` on its own.`
+            : `Realigns the existing \`ms-gdk\` override from \`${pinned}\` to \`${proposedDefault}\`, so default builds stop restoring the older pinned SDK.`,
         );
         directives.push({
           path: 'vcpkg.json',
@@ -406,7 +424,7 @@ function planSupportUpdate({ release, sources: rawSources, registry }) {
             ? 'Update the existing `ms-gdk` entry under `overrides` to the version below. Leave every other override alone.'
             : 'Add an `overrides` array pinning `ms-gdk` to the version below, immediately above the top-level ' +
               '`"features"` block. Preserve the existing hand-formatted inline arrays elsewhere in the manifest.',
-          why: `the selected registry baseline resolves \`${resolved}\` on its own, which is not the proposed default`,
+          why,
           from: manifest.from,
           to: proposedDefault,
         });
@@ -430,6 +448,11 @@ function planSupportUpdate({ release, sources: rawSources, registry }) {
     kind: registry && registry.available ? 'vcpkg' : 'installed',
     hostedChanged,
     defaultChanged,
+    defaultVersion,
+    // A backlog release older than the committed default does not become the
+    // default, so the ordinary `cmake --preset default` run would validate the
+    // newer SDK instead of this candidate.
+    candidateIsDefault: defaultVersion === null || defaultVersion === release.version,
     baselineChange: registry && registry.available ? registry.baselineChange : null,
   };
 }
@@ -470,12 +493,24 @@ function leadingComments(body) {
 
 function validationCommands({ plan, release }) {
   if (plan.kind === 'vcpkg') {
-    return [
+    const commands = [];
+    if (!plan.candidateIsDefault) {
+      // The committed default stays on the newer SDK, so the candidate has to
+      // be selected explicitly or this run validates the wrong edition.
+      commands.push(
+        `# Temporarily select the candidate: set the "ms-gdk" override in vcpkg.json to ${release.version}`,
+      );
+    }
+    commands.push(
       'cmake --preset default',
       'pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\\tools\\run_all_tests.ps1',
       'cmake --preset default-release',
       'cmake --build --preset release',
-    ];
+    );
+    if (!plan.candidateIsDefault) {
+      commands.push(`# Restore the committed "ms-gdk" override to ${plan.defaultVersion} before committing`);
+    }
+    return commands;
   }
   return [
     `cmake --preset installed-gdk -DGDK_VERSION=${release.edition}`,
@@ -495,7 +530,12 @@ function validationSection({ plan, release }) {
   ];
   if (plan.kind === 'vcpkg') {
     lines.push(
-      'This branch moves the vcpkg configuration, so the standard orchestrator run exercises the new SDK:',
+      plan.candidateIsDefault
+        ? 'This branch moves the vcpkg configuration, so the standard orchestrator run exercises the new SDK:'
+        : `This release is older than the committed default \`${plan.defaultVersion}\`, so it does **not** become the ` +
+          'default. `cmake --preset default` on its own would validate the newer SDK, not this candidate — pin ' +
+          `\`ms-gdk\` to \`${release.version}\` in \`vcpkg.json\` for the run, then restore the committed override ` +
+          'before committing (see `docs/getting-started.md`, "Switching GDK editions on the vcpkg path"):',
       '',
       '```powershell',
       ...validationCommands({ plan, release }),

@@ -592,7 +592,7 @@ test('runWatch reuses an existing tracking issue and respects its recorded state
           user: { login: BOT },
           body: watch.renderStateComment({
             releaseId: 2,
-            state: { status: 'assessment-dispatched', fingerprint: 'whatever', runId: '1' },
+            state: { status: 'assessment-dispatched', fingerprint: 'whatever', runId: '1', at: new Date().toISOString() },
           }),
         },
       ],
@@ -610,6 +610,64 @@ test('runWatch reuses an existing tracking issue and respects its recorded state
   assert.equal(result.decisions.get('2').dispatch, false);
   assert.match(result.decisions.get('2').reason, /already in flight/);
   assert.ok(github.state.dispatches.every((entry) => entry.inputs.release_id !== '2'));
+});
+
+test('runWatch re-queues an attempt that died without posting an assessment', async () => {
+  const release = eligible(makeRelease({ id: 2 }));
+  const issue = trackingIssue({ number: 100, releaseId: 2, release });
+  // Nothing ever writes `assessment-failed` on the assessor's behalf, so an
+  // assessor that crashed would otherwise leave this release in flight forever.
+  const stale = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const github = fakeGithub({
+    releases: watchReleases(),
+    issues: [issue],
+    comments: {
+      100: [
+        {
+          id: 1,
+          user: { login: BOT },
+          body: watch.renderStateComment({
+            releaseId: 2,
+            state: { status: 'assessment-dispatched', fingerprint: 'whatever', runId: '1', at: stale },
+          }),
+        },
+      ],
+    },
+  });
+  const result = await watch.runWatch({
+    github,
+    context: CONTEXT,
+    core: fakeCore(),
+    env: { ...TRUSTED_ENV, GDK_WATCH_INPUTS: '{"drain_backlog":true}' },
+    root: makeSupportFixture(),
+  });
+
+  assert.equal(result.decisions.get('2').dispatch, true);
+  assert.match(result.decisions.get('2').reason, /timed-out attempt/);
+  const bodies = github.state.createdComments.filter((entry) => entry.issue === 100).map((entry) => entry.body);
+  assert.ok(bodies.some((body) => /assessment-failed/.test(body)), 'the dead attempt is closed out before re-queueing');
+  assert.ok(bodies.some((body) => /assessment-dispatched/.test(body)));
+  assert.ok(github.state.dispatches.some((entry) => entry.inputs.release_id === '2'));
+});
+
+test('a failed dispatch is recorded instead of leaving the ledger in flight', async () => {
+  const github = fakeGithub({ releases: watchReleases(), issues: [], comments: {} });
+  github.rest.actions.createWorkflowDispatch = async () => {
+    throw new Error('Resource not accessible by integration');
+  };
+
+  await assert.rejects(
+    watch.runWatch({
+      github,
+      context: CONTEXT,
+      core: fakeCore(),
+      env: { ...TRUSTED_ENV },
+      root: makeSupportFixture(),
+    }),
+    /Resource not accessible by integration/,
+  );
+  const bodies = github.state.createdComments.map((entry) => entry.body);
+  assert.ok(bodies.some((body) => /assessment-failed/.test(body) && /dispatch failed/.test(body)));
 });
 
 test('runWatch never reopens work a human closed', async () => {

@@ -26,6 +26,7 @@ const {
   WatchError,
   classifyRelease,
   computeEvidenceFingerprint,
+  evaluateTrustedContext,
   findSupportBaselineRelease,
   latestState,
   listUpstreamReleases,
@@ -34,7 +35,13 @@ const {
   selectBacklog,
 } = require('./gdk_release_watch.cjs');
 
-const REPORT_ITEM_TYPE = 'gdk_release_assessment';
+// gh-aw names the safe-output item after its job, with hyphens normalised to
+// underscores: the `post-gdk-assessment` job in gdk-release-assess.md emits
+// items of type `post_gdk_assessment`, and the compiled lock gates that job on
+// `contains(needs.agent.outputs.output_types, 'post_gdk_assessment')`. This
+// constant must track the job name, not the report's own vocabulary.
+const REPORT_ITEM_TYPE = 'post_gdk_assessment';
+const ASSESS_SAFE_OUTPUT_JOB = 'post-gdk-assessment';
 const DEFAULT_BOT_LOGIN = 'github-actions[bot]';
 
 const LIMITS = Object.freeze({
@@ -480,11 +487,12 @@ function renderAssessmentComment({
   sha,
   runUrl,
   pullRequestUrl,
+  attemptKey,
   proposal,
   proposalError,
 }) {
   const lines = [
-    `<!-- xbox-godot-gdk-release-assessment id=${release.id} sha=${sha} -->`,
+    `<!-- xbox-godot-gdk-release-assessment id=${release.id} sha=${sha} attempt=${attemptKey || 'preview'} -->`,
     `## 🤖 GDK ${release.version} support assessment`,
     '',
     '> [!NOTE]',
@@ -628,19 +636,29 @@ async function findExistingAssessment({ github, owner, repo, issueNumber, releas
     issue_number: issueNumber,
     per_page: 100,
   });
-  const existing = comments.find(
+  const reports = comments.filter(
     (comment) =>
       comment.user && comment.user.login === botLogin && typeof comment.body === 'string' && comment.body.startsWith(prefix),
   );
-  return { existing: existing || null, comments };
+  return { reports, comments };
+}
+
+// An explicit retry re-queues the same evidence, so the fingerprint cannot
+// identify an attempt. The watcher run that queued the work can, which lets a
+// retry post a fresh report while a re-run of the *same* attempt still
+// deduplicates.
+function attemptKeyFor(state, fingerprint) {
+  return String((state && state.runId) || `fingerprint-${fingerprint}`);
+}
+
+function findAssessmentForAttempt({ reports, attemptKey }) {
+  const marker = ` attempt=${attemptKey} `;
+  return reports.find((comment) => comment.body.split('\n', 1)[0].includes(marker)) || null;
 }
 
 // Re-reads the watcher's own state ledger rather than trusting the dispatch
 // inputs: a run that is no longer the in-flight assessment must not publish.
-function assertDispatchIsCurrent({ comments, releaseId, fingerprint, botLogin }) {
-  const found = latestState(comments, releaseId, botLogin);
-  if (!found) throw new WatchError('No in-flight watcher state was found for this release; nothing was published.');
-  const { state } = found;
+function assertDispatchIsCurrent({ state, fingerprint }) {
   if (state.status !== 'assessment-dispatched') {
     throw new WatchError(`The watcher state for this release is \`${state.status}\`, not an in-flight assessment.`);
   }
@@ -654,7 +672,13 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
   const { owner, repo } = context.repo;
   const sha = env.GITHUB_SHA;
   const botLogin = env.GDK_WATCH_BOT_LOGIN || DEFAULT_BOT_LOGIN;
-  const staged = env.GDK_ASSESS_MODE !== 'post';
+  // The assessor is independently dispatchable, so the watcher's trusted-context
+  // check does not cover it. Without this, a feature-branch dispatch could reuse
+  // a queued fingerprint and publish comments derived from that branch's
+  // snapshot of the support lists. Untrusted runs render a preview instead.
+  const trust = evaluateTrustedContext({ context, env });
+  if (!trust.trusted) core.notice(`Staged preview only: ${trust.reason}.`);
+  const staged = env.GDK_ASSESS_MODE !== 'post' || !trust.trusted;
   if (!/^[0-9a-f]{40}$/.test(sha || '')) throw new WatchError('GITHUB_SHA is not a full commit SHA.');
 
   const prepared = readPreparedContext(contextPath);
@@ -683,10 +707,17 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     });
     await core.summary.addHeading('Staged GDK assessment preview', 2).addRaw(`\n\n${body}\n`).write();
     core.notice('Staged mode: the assessment was rendered to the step summary and not posted.');
-    return { posted: false, staged: true, classification: validated.report.classification, body };
+    return {
+      posted: false,
+      staged: true,
+      trusted: trust.trusted,
+      stagedReason: trust.trusted ? 'GDK_ASSESS_MODE is not `post`' : trust.reason,
+      classification: validated.report.classification,
+      body,
+    };
   }
 
-  const { existing, comments } = await findExistingAssessment({
+  const { reports, comments } = await findExistingAssessment({
     github,
     owner,
     repo,
@@ -694,11 +725,40 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     releaseId: inputs.releaseId,
     botLogin,
   });
+  const found = latestState(comments, inputs.releaseId, botLogin);
+  if (!found) throw new WatchError('No in-flight watcher state was found for this release; nothing was published.');
+  const attemptKey = attemptKeyFor(found.state, inputs.fingerprint);
+  const existing = findAssessmentForAttempt({ reports, attemptKey });
   if (existing) {
-    core.notice(`An assessment for this release is already posted: ${existing.html_url}`);
-    return { posted: false, existing: existing.html_url, classification: validated.report.classification };
+    core.notice(`This attempt already posted its assessment: ${existing.html_url}`);
+    // A run that posted its report and then died leaves the ledger in flight,
+    // which the watcher reads as "permanently queued". Close it out instead of
+    // returning early and stranding the release.
+    let repaired = false;
+    if (found.state.status === 'assessment-dispatched') {
+      await github.rest.issues.createComment({
+        owner,
+        repo,
+        issue_number: inputs.issueNumber,
+        body: renderStateComment({
+          releaseId: prepared.release.id,
+          state: {
+            status: STATUS_FOR_CLASSIFICATION[validated.report.classification],
+            fingerprint: inputs.fingerprint,
+            runId: env.GITHUB_RUN_ID || null,
+            runUrl,
+            assessmentUrl: existing.html_url,
+            note: 'recovered: this attempt had already posted its report',
+            at: new Date().toISOString(),
+          },
+        }),
+      });
+      repaired = true;
+      core.notice('Recorded the terminal state for an assessment that was already posted.');
+    }
+    return { posted: false, existing: existing.html_url, repaired, classification: validated.report.classification };
   }
-  assertDispatchIsCurrent({ comments, releaseId: inputs.releaseId, fingerprint: inputs.fingerprint, botLogin });
+  assertDispatchIsCurrent({ state: found.state, fingerprint: inputs.fingerprint });
 
   let proposal = null;
   let proposalNote = null;
@@ -723,6 +783,7 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     sha,
     runUrl,
     pullRequestUrl: proposal ? proposal.url || null : null,
+    attemptKey,
     proposal,
     proposalError: proposalNote,
   });
@@ -765,6 +826,7 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
 }
 
 module.exports = {
+  ASSESS_SAFE_OUTPUT_JOB,
   CLASSIFICATIONS,
   CLASSIFICATION_LABELS,
   CONFIDENCE,
@@ -779,7 +841,9 @@ module.exports = {
   WatchError,
   applyConsistencyRules,
   assertDispatchIsCurrent,
+  attemptKeyFor,
   buildAssessmentContext,
+  findAssessmentForAttempt,
   findExistingAssessment,
   prepareAssessmentContext,
   publishAssessment,

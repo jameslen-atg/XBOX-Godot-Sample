@@ -39,6 +39,9 @@ const LIMITS = Object.freeze({
   maxIssueBodyChars: 60000,
   maxNotesChars: 40000,
   maxQueuedPerRun: 1,
+  // An assessment that has not reported back well inside this window is dead:
+  // the assessor finishes in minutes, and the watcher polls weekly.
+  assessmentTimeoutMs: 6 * 60 * 60 * 1000,
 });
 
 const MONTHS = Object.freeze({
@@ -535,6 +538,17 @@ function assessmentDecision({ record, fingerprint, retry }) {
   if (!state) return { dispatch: true, reason: 'tracking issue has no recorded state', priority: 0 };
   if (retry) return { dispatch: true, reason: 'explicit retry requested', priority: 0 };
   if (state.status === 'assessment-dispatched') {
+    // An attempt whose run already finished without posting is dead, not in
+    // flight. Without this the release stays queued forever, because nothing
+    // else writes `assessment-failed`.
+    if (record.staleAttempt) {
+      return {
+        dispatch: true,
+        reason: `the previous attempt ended as ${record.staleAttempt} without posting an assessment`,
+        priority: 2,
+        reconcile: record.staleAttempt,
+      };
+    }
     return { dispatch: false, reason: `an assessment is already in flight (run ${state.runId || 'unknown'})` };
   }
   if (state.status === 'assessment-failed') {
@@ -546,7 +560,18 @@ function assessmentDecision({ record, fingerprint, retry }) {
   return { dispatch: false, reason: `already assessed as ${state.status}` };
 }
 
-async function loadRecords({ github, owner, repo, botLogin, backlog }) {
+// An `assessment-dispatched` record is only in flight while its attempt could
+// still be running. Past that window the attempt failed somewhere the watcher
+// cannot observe (dispatch rejected, agent crashed, detection blocked the safe
+// output), and the release must become eligible again.
+function staleAttemptStatus(state, now) {
+  if (!state || state.status !== 'assessment-dispatched') return null;
+  const startedAt = Date.parse(state.at || '');
+  if (!Number.isFinite(startedAt)) return 'an attempt with no recorded start time';
+  return now - startedAt > LIMITS.assessmentTimeoutMs ? 'a timed-out attempt' : null;
+}
+
+async function loadRecords({ github, owner, repo, botLogin, backlog, now = Date.now() }) {
   const issues = await listTrackingIssues({ github, owner, repo, botLogin });
   const records = new Map();
   for (const release of backlog) {
@@ -559,7 +584,8 @@ async function loadRecords({ github, owner, repo, botLogin, backlog }) {
       per_page: 100,
     });
     const found = latestState(comments, release.id, botLogin);
-    records.set(String(release.id), { issue, state: found ? found.state : null });
+    const state = found ? found.state : null;
+    records.set(String(release.id), { issue, state, staleAttempt: staleAttemptStatus(state, now) });
   }
   return records;
 }
@@ -658,11 +684,13 @@ async function runWatch({ github, context, core, env, root }) {
       existing: existing ? existing.issue : null,
       publish: !preview,
     });
-    const record = ensured.issue ? { issue: ensured.issue, state: existing ? existing.state : null } : null;
+    const record = ensured.issue
+      ? { issue: ensured.issue, state: existing ? existing.state : null, staleAttempt: existing ? existing.staleAttempt : null }
+      : null;
     const decision = assessmentDecision({ record, fingerprint, retry: inputs.retry });
     decisions.set(String(release.id), decision);
     if (decision.dispatch && record) {
-      ready.push({ release, issue: record.issue, fingerprint, priority: decision.priority });
+      ready.push({ release, issue: record.issue, fingerprint, priority: decision.priority, reconcile: decision.reconcile || null });
     }
   }
 
@@ -672,6 +700,25 @@ async function runWatch({ github, context, core, env, root }) {
 
   if (!preview) {
     for (const item of selected) {
+      if (item.reconcile) {
+        await github.rest.issues.createComment({
+          owner,
+          repo,
+          issue_number: item.issue.number,
+          body: renderStateComment({
+            releaseId: item.release.id,
+            state: {
+              status: 'assessment-failed',
+              fingerprint: item.fingerprint,
+              runId: env.GITHUB_RUN_ID || null,
+              runUrl,
+              note: `closed out ${item.reconcile} before re-queueing`,
+              at: new Date().toISOString(),
+            },
+          }),
+        });
+        core.warning(`GDK ${item.release.version}: closed out ${item.reconcile} and re-queued the assessment.`);
+      }
       await github.rest.issues.createComment({
         owner,
         repo,
@@ -687,7 +734,29 @@ async function runWatch({ github, context, core, env, root }) {
           },
         }),
       });
-      await dispatchAssessment({ github, core, owner, repo, release: item.release, issue: item.issue, fingerprint: item.fingerprint, env });
+      try {
+        await dispatchAssessment({ github, core, owner, repo, release: item.release, issue: item.issue, fingerprint: item.fingerprint, env });
+      } catch (error) {
+        // The ledger already says "in flight". Leaving it that way after a
+        // failed dispatch strands the release until a human forces a retry.
+        await github.rest.issues.createComment({
+          owner,
+          repo,
+          issue_number: item.issue.number,
+          body: renderStateComment({
+            releaseId: item.release.id,
+            state: {
+              status: 'assessment-failed',
+              fingerprint: item.fingerprint,
+              runId: env.GITHUB_RUN_ID || null,
+              runUrl,
+              note: `dispatch failed: ${error.message}`,
+              at: new Date().toISOString(),
+            },
+          }),
+        });
+        throw error;
+      }
     }
   } else if (selected.length) {
     core.info(`Preview: would dispatch ${selected.length} assessment(s).`);
