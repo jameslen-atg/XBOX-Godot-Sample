@@ -131,17 +131,21 @@ function assessEnv(overrides = {}) {
       release_tag: RELEASE.tag,
       issue_number: 321,
       evidence_fingerprint: FINGERPRINT,
+      attempt: '555',
     }),
     ...overrides,
   };
 }
 
-function stateComment(status, { fingerprint = FINGERPRINT, login = BOT, runId = 555 } = {}) {
+function stateComment(status, { fingerprint = FINGERPRINT, login = BOT, runId = 555, attempt = '555' } = {}) {
   return {
     id: 1,
     user: { login },
     html_url: 'https://example.test/comment/1',
-    body: watch.renderStateComment({ releaseId: RELEASE.id, state: { status, fingerprint, runId, at: '2026-05-01T00:00:00Z' } }),
+    body: watch.renderStateComment({
+      releaseId: RELEASE.id,
+      state: { status, fingerprint, runId, attempt, at: '2026-05-01T00:00:00Z' },
+    }),
   };
 }
 
@@ -170,7 +174,7 @@ const CONTEXT = { repo: { owner: 'microsoft', repo: 'XBOX-Godot-Sample' } };
 
 test('readAssessInputs requires a fully identified dispatch', () => {
   const inputs = assess.readAssessInputs(assessEnv());
-  assert.deepEqual(inputs, { releaseId: '4242', releaseTag: RELEASE.tag, issueNumber: 321, fingerprint: FINGERPRINT });
+  assert.deepEqual(inputs, { releaseId: '4242', releaseTag: RELEASE.tag, issueNumber: 321, fingerprint: FINGERPRINT, attempt: '555' });
 
   const without = (key) => {
     const parsed = JSON.parse(assessEnv().GDK_ASSESS_INPUTS);
@@ -519,11 +523,47 @@ test('assertDispatchIsCurrent only accepts the in-flight state it was queued und
       }),
     /A newer assessment was queued/,
   );
+
+  // Same evidence, but an explicit retry re-queued it under a new watcher run
+  // while this assessor was still working. Publishing now would settle the
+  // retry with a stale report.
+  assert.throws(
+    () =>
+      assess.assertDispatchIsCurrent({
+        state: { status: 'assessment-dispatched', fingerprint: FINGERPRINT, attempt: '777' },
+        fingerprint: FINGERPRINT,
+        attempt: '555',
+      }),
+    /Attempt `777` is now in flight/,
+  );
+  assert.equal(
+    assess.assertDispatchIsCurrent({
+      state: { status: 'assessment-dispatched', fingerprint: FINGERPRINT, attempt: '555' },
+      fingerprint: FINGERPRINT,
+      attempt: '555',
+    }).status,
+    'assessment-dispatched',
+  );
 });
 
-test('an attempt is keyed by the watcher run, so a retry is not treated as a duplicate', () => {
-  assert.equal(assess.attemptKeyFor({ runId: 4242 }, FINGERPRINT), '4242');
-  assert.equal(assess.attemptKeyFor({}, FINGERPRINT), `fingerprint-${FINGERPRINT}`);
+test('the attempt id comes from dispatch inputs, not from the ledger', () => {
+  // Derived once by the watcher and carried as an input, so a concurrent retry
+  // moving the ledger on cannot change what this run believes it is.
+  assert.equal(watch.assessmentAttemptKey({ runId: 4242, fingerprint: FINGERPRINT }), '4242');
+  assert.equal(watch.assessmentAttemptKey({ fingerprint: FINGERPRINT }), `fingerprint-${FINGERPRINT}`);
+  assert.throws(() => watch.assessmentAttemptKey({ runId: 'a -->b', fingerprint: FINGERPRINT }), /Unusable assessment attempt id/);
+
+  assert.equal(assess.readAssessInputs(assessEnv()).attempt, '555');
+  const manual = assess.readAssessInputs(
+    assessEnv({
+      GDK_ASSESS_INPUTS: JSON.stringify({
+        release_id: String(RELEASE.id),
+        issue_number: 321,
+        evidence_fingerprint: FINGERPRINT,
+      }),
+    }),
+  );
+  assert.equal(manual.attempt, `fingerprint-${FINGERPRINT}`);
 
   const reportFor = (attempt) => ({
     body: `<!-- xbox-godot-gdk-release-assessment id=${RELEASE.id} sha=${'a'.repeat(40)} attempt=${attempt} -->\nbody`,
@@ -647,6 +687,51 @@ test('publishAssessment refuses to publish a superseded run', async (t) => {
     assess.publishAssessment(publishArgs(t, { comments: [stateComment('assessment-dispatched', { fingerprint: '3'.repeat(64) })] })),
     /A newer assessment was queued/,
   );
+});
+
+test('an overlapping retry is not settled by the slower run it overtook', async (t) => {
+  // Watcher run 555 dispatched this assessor; run 777 then retried the same
+  // evidence while 555 was still working. 555 must not publish its older
+  // report as 777's result, and must not consume 777's attempt key.
+  const args = publishArgs(t, {
+    comments: [stateComment('assessment-dispatched', { runId: 777, attempt: '777' })],
+  });
+  await assert.rejects(assess.publishAssessment(args), /Attempt `777` is now in flight/);
+  assert.equal(args.github.state.created.length, 0);
+});
+
+test('re-running a completed assessor run finds its own report instead of republishing', async (t) => {
+  // Both terminal-state writers preserve the watcher attempt, so a rerun of the
+  // same assessor run recomputes the same key and recognises its own report.
+  const first = publishArgs(t, { comments: [stateComment('assessment-dispatched')] });
+  const posted = await assess.publishAssessment(first);
+  assert.equal(posted.posted, true);
+
+  const report = {
+    id: 11,
+    user: { login: BOT },
+    html_url: posted.url,
+    body: first.github.state.created[0].body,
+  };
+  const terminal = {
+    id: 12,
+    user: { login: BOT },
+    html_url: 'https://example.test/comment/12',
+    body: first.github.state.created[1].body,
+  };
+  const settled = watch.latestState([terminal], String(RELEASE.id), BOT);
+  assert.equal(settled.state.attempt, '555');
+  // The watcher run that queued the work stays on the record; the assessor run
+  // is recorded separately rather than overwriting it.
+  assert.equal(settled.state.runId, 555);
+  assert.equal(settled.state.assessorRunUrl, 'https://github.com/microsoft/XBOX-Godot-Sample/actions/runs/98765');
+
+  const rerun = publishArgs(t, { comments: [stateComment('assessment-dispatched'), report, terminal] });
+  const result = await assess.publishAssessment(rerun);
+  assert.deepEqual([result.posted, result.existing], [false, posted.url]);
+  // The ledger is already terminal, so there is nothing left to repair.
+  assert.equal(result.repaired, false);
+  assert.equal(rerun.github.state.created.length, 0);
 });
 
 test('publishAssessment opens a draft pull request only for a surviving tests_only report', async (t) => {

@@ -24,6 +24,7 @@ const {
   UPSTREAM_OWNER,
   UPSTREAM_REPO,
   WatchError,
+  assessmentAttemptKey,
   classifyRelease,
   computeEvidenceFingerprint,
   evaluateTrustedContext,
@@ -100,11 +101,19 @@ function readAssessInputs(env) {
   if (!/^\d+$/.test(releaseId)) throw new WatchError('release_id must be a numeric release id.');
   if (!Number.isInteger(issueNumber) || issueNumber <= 0) throw new WatchError('issue_number must be a positive integer.');
   if (!/^[0-9a-f]{64}$/.test(fingerprint)) throw new WatchError('evidence_fingerprint must be a sha256 hex digest.');
+  // The watcher stamps the attempt it queued. A manual dispatch has no such id,
+  // and falls back to a value derived from the evidence: two hand-dispatched
+  // runs over identical evidence are the same attempt, which is what we want.
+  const attempt = assessmentAttemptKey({
+    runId: String(inputs.attempt || '').trim() || null,
+    fingerprint,
+  });
   return {
     releaseId,
     releaseTag: String(inputs.release_tag || '').trim() || null,
     issueNumber,
     fingerprint,
+    attempt,
   };
 }
 
@@ -264,6 +273,7 @@ async function prepareAssessmentContext({ github, context, core, env, root, outD
     issue: inputs.issueNumber,
     sha,
     fingerprint,
+    attempt: inputs.attempt,
     release: {
       id: release.id,
       tag: release.tag,
@@ -650,13 +660,10 @@ async function findExistingAssessment({ github, owner, repo, issueNumber, releas
 }
 
 // An explicit retry re-queues the same evidence, so the fingerprint cannot
-// identify an attempt. The watcher run that queued the work can, which lets a
-// retry post a fresh report while a re-run of the *same* attempt still
-// deduplicates.
-function attemptKeyFor(state, fingerprint) {
-  return String((state && state.runId) || `fingerprint-${fingerprint}`);
-}
-
+// identify an attempt. The watcher run that queued the work can. The key is
+// taken from this run's dispatch inputs and never re-read from the ledger: a
+// concurrent retry moves the ledger on, and adopting its id would let this
+// older run publish its report as that retry's result.
 function findAssessmentForAttempt({ reports, attemptKey }) {
   const marker = ` attempt=${attemptKey} `;
   return reports.find((comment) => comment.body.split('\n', 1)[0].includes(marker)) || null;
@@ -664,12 +671,19 @@ function findAssessmentForAttempt({ reports, attemptKey }) {
 
 // Re-reads the watcher's own state ledger rather than trusting the dispatch
 // inputs: a run that is no longer the in-flight assessment must not publish.
-function assertDispatchIsCurrent({ state, fingerprint }) {
+function assertDispatchIsCurrent({ state, fingerprint, attempt }) {
   if (state.status !== 'assessment-dispatched') {
     throw new WatchError(`The watcher state for this release is \`${state.status}\`, not an in-flight assessment.`);
   }
   if (state.fingerprint !== fingerprint) {
     throw new WatchError('A newer assessment was queued for this release; this run will not publish.');
+  }
+  // Same evidence, different attempt: a retry was queued while this run was
+  // still working. Publishing now would settle that retry with a stale report.
+  if (attempt && state.attempt && state.attempt !== attempt) {
+    throw new WatchError(
+      `Attempt \`${state.attempt}\` is now in flight for this release; this run (\`${attempt}\`) will not publish.`,
+    );
   }
   return state;
 }
@@ -694,6 +708,9 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
   }
   if (prepared.fingerprint !== inputs.fingerprint) {
     throw new WatchError('Prepared context was built for a different evidence fingerprint.');
+  }
+  if (prepared.attempt && prepared.attempt !== inputs.attempt) {
+    throw new WatchError('Prepared context was built for a different assessment attempt.');
   }
 
   const validated = validateAgentOutput({ core, agentOutputPath, root });
@@ -733,7 +750,7 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
   });
   const found = latestState(comments, inputs.releaseId, botLogin);
   if (!found) throw new WatchError('No in-flight watcher state was found for this release; nothing was published.');
-  const attemptKey = attemptKeyFor(found.state, inputs.fingerprint);
+  const attemptKey = inputs.attempt;
   const existing = findAssessmentForAttempt({ reports, attemptKey });
   if (existing) {
     core.notice(`This attempt already posted its assessment: ${existing.html_url}`);
@@ -751,8 +768,10 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
           state: {
             status: STATUS_FOR_CLASSIFICATION[validated.report.classification],
             fingerprint: inputs.fingerprint,
-            runId: env.GITHUB_RUN_ID || null,
-            runUrl,
+            attempt: attemptKey,
+            runId: found.state.runId || null,
+            runUrl: found.state.runUrl || null,
+            assessorRunUrl: runUrl,
             assessmentUrl: existing.html_url,
             note: 'recovered: this attempt had already posted its report',
             at: new Date().toISOString(),
@@ -764,7 +783,7 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     }
     return { posted: false, existing: existing.html_url, repaired, classification: validated.report.classification };
   }
-  assertDispatchIsCurrent({ state: found.state, fingerprint: inputs.fingerprint });
+  assertDispatchIsCurrent({ state: found.state, fingerprint: inputs.fingerprint, attempt: attemptKey });
 
   let proposal = null;
   let proposalNote = null;
@@ -810,8 +829,10 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
       state: {
         status: STATUS_FOR_CLASSIFICATION[validated.report.classification],
         fingerprint: inputs.fingerprint,
-        runId: env.GITHUB_RUN_ID || null,
-        runUrl,
+        attempt: attemptKey,
+        runId: found.state.runId || null,
+        runUrl: found.state.runUrl || null,
+        assessorRunUrl: runUrl,
         assessmentUrl: comment.html_url,
         pullRequest: proposal ? proposal.url || null : null,
         supportBranch: proposal ? proposal.branch || null : null,
@@ -847,7 +868,6 @@ module.exports = {
   WatchError,
   applyConsistencyRules,
   assertDispatchIsCurrent,
-  attemptKeyFor,
   buildAssessmentContext,
   findAssessmentForAttempt,
   findExistingAssessment,

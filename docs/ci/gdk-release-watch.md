@@ -78,6 +78,17 @@ attempt out and re-queues the release behind never-attempted work. A dispatch
 that fails outright is recorded the same way before the error is re-raised, so a
 failed run is always visible in both the Actions log and the tracking issue.
 
+Each dispatch also carries an **attempt id** — the watcher run that queued it —
+as a workflow input. The assessor never re-derives that id from the ledger,
+because an explicit retry re-queues the *same* evidence under a *new* watcher
+run: a slow assessor reading the ledger at publish time would otherwise adopt
+the retry's id and settle it with an older report. An assessor that finds a
+different attempt in flight refuses to publish and lets the retry win. Both
+terminal states preserve the queuing watcher run and record the assessor run
+separately as `assessorRunUrl`, so re-running a finished assessor recognises its
+own report instead of posting a duplicate. A manual dispatch may leave `attempt`
+empty; the assessor then derives a stable id from the evidence fingerprint.
+
 ### Manual dispatch
 
 Run **GDK Release Watch** from the Actions tab:

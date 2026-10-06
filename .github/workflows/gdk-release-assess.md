@@ -22,6 +22,12 @@ on:
         description: Evidence digest computed by the watcher when it queued this release.
         required: true
         type: string
+      attempt:
+        description: >-
+          Watcher run id that queued this attempt. Leave empty for a manual
+          dispatch; the assessor then derives a stable id from the evidence.
+        required: false
+        type: string
 permissions:
   contents: read
   issues: read

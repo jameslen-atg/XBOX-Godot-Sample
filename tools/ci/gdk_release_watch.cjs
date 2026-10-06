@@ -594,7 +594,18 @@ async function loadRecords({ github, owner, repo, botLogin, backlog, now = Date.
   return records;
 }
 
-async function dispatchAssessment({ github, core, owner, repo, release, issue, fingerprint, env }) {
+// Identifies one dispatch attempt. A retry re-queues the same evidence, so the
+// fingerprint cannot tell two attempts apart; the watcher run that queued the
+// work can. This is computed once, at dispatch, and then travels as an input so
+// that neither side has to re-derive it from a ledger another run may have
+// moved on. The character class keeps it safe to embed in an HTML marker.
+function assessmentAttemptKey({ runId, fingerprint }) {
+  const key = String(runId || `fingerprint-${fingerprint}`);
+  if (!/^[A-Za-z0-9._-]{1,96}$/.test(key)) throw new WatchError(`Unusable assessment attempt id: ${key}`);
+  return key;
+}
+
+async function dispatchAssessment({ github, core, owner, repo, release, issue, fingerprint, attempt, env }) {
   const ref = (env.GITHUB_REF_NAME || 'main').trim();
   await github.rest.actions.createWorkflowDispatch({
     owner,
@@ -606,6 +617,7 @@ async function dispatchAssessment({ github, core, owner, repo, release, issue, f
       release_tag: release.tag,
       issue_number: String(issue.number),
       evidence_fingerprint: fingerprint,
+      attempt,
     },
   });
   core.notice(`Dispatched the assessor for GDK ${release.version} (issue #${issue.number}).`);
@@ -706,6 +718,7 @@ async function runWatch({ github, context, core, env, root }) {
 
   if (!preview) {
     for (const item of selected) {
+      const attempt = assessmentAttemptKey({ runId: env.GITHUB_RUN_ID, fingerprint: item.fingerprint });
       if (item.reconcile) {
         await github.rest.issues.createComment({
           owner,
@@ -734,6 +747,7 @@ async function runWatch({ github, context, core, env, root }) {
           state: {
             status: 'assessment-dispatched',
             fingerprint: item.fingerprint,
+            attempt,
             runId: env.GITHUB_RUN_ID || null,
             runUrl,
             at: new Date().toISOString(),
@@ -741,7 +755,17 @@ async function runWatch({ github, context, core, env, root }) {
         }),
       });
       try {
-        await dispatchAssessment({ github, core, owner, repo, release: item.release, issue: item.issue, fingerprint: item.fingerprint, env });
+        await dispatchAssessment({
+          github,
+          core,
+          owner,
+          repo,
+          release: item.release,
+          issue: item.issue,
+          fingerprint: item.fingerprint,
+          attempt,
+          env,
+        });
       } catch (error) {
         // The ledger already says "in flight". Leaving it that way after a
         // failed dispatch strands the release until a human forces a retry.
@@ -754,6 +778,7 @@ async function runWatch({ github, context, core, env, root }) {
             state: {
               status: 'assessment-failed',
               fingerprint: item.fingerprint,
+              attempt,
               runId: env.GITHUB_RUN_ID || null,
               runUrl,
               note: `dispatch failed: ${error.message}`,
@@ -789,6 +814,7 @@ module.exports = {
   UPSTREAM_OWNER,
   UPSTREAM_REPO,
   WatchError,
+  assessmentAttemptKey,
   assessmentDecision,
   classifyRelease,
   compareReleases,

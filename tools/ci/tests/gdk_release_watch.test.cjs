@@ -554,6 +554,10 @@ test('runWatch opens one tracking issue per release but dispatches only one asse
   const stateComment = github.state.createdComments.find((entry) => entry.body.includes('assessment-dispatched'));
   assert.ok(stateComment, 'the dispatch is recorded in the durable ledger before it is sent');
   assert.equal(watch.parseStateComment(stateComment.body).fingerprint, dispatch.inputs.evidence_fingerprint);
+  // The attempt id travels as a dispatch input so the assessor never has to
+  // re-derive it from a ledger a concurrent retry may already have moved on.
+  assert.equal(dispatch.inputs.attempt, '555');
+  assert.equal(watch.parseStateComment(stateComment.body).attempt, '555');
   assert.equal(core.outputs.dispatched, '1');
 });
 
