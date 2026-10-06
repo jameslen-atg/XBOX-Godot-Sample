@@ -221,7 +221,17 @@ function buildAssessmentContext({ release, baselineRelease, candidateBody, basel
   ].join('\n');
 
   const bounded = truncate(markdown, limits.totalContextChars);
-  return { markdown: bounded.text, truncated: bounded.truncated || contextNotes.length > 0, notes: contextNotes };
+  // Truncation is trusted evidence about what the agent could not see, so it is
+  // recorded separately from the missing-baseline note: a missing baseline makes
+  // the delta wider, not shorter, and must not read as "evidence was cut off".
+  const evidence = {
+    notesTruncated: notes.truncated,
+    deltaTruncated: delta.truncated,
+    contextTruncated: bounded.truncated,
+    truncated: notes.truncated || delta.truncated || bounded.truncated,
+    baselineMissing: !baselineRelease,
+  };
+  return { markdown: bounded.text, truncated: evidence.truncated, notes: contextNotes, evidence };
 }
 
 async function prepareAssessmentContext({ github, context, core, env, root, outDir, sha }) {
@@ -258,7 +268,7 @@ async function prepareAssessmentContext({ github, context, core, env, root, outD
     );
   }
 
-  const { markdown } = buildAssessmentContext({
+  const { markdown, evidence } = buildAssessmentContext({
     release,
     baselineRelease,
     candidateBody: upstream.body,
@@ -275,6 +285,7 @@ async function prepareAssessmentContext({ github, context, core, env, root, outD
     sha,
     fingerprint,
     attempt: inputs.attempt,
+    evidence,
     release: {
       id: release.id,
       tag: release.tag,
@@ -400,7 +411,12 @@ function validateReport(report) {
 // it is downgraded to `needs_review` with the reason recorded in the posted
 // comment. Only `tests_only` can open a pull request, so the bar it has to
 // clear is the bar that keeps an unvalidated SDK out of the support lists.
-function applyConsistencyRules(report) {
+//
+// `evidence` is the trusted record of what the context builder actually fed the
+// agent. It is deliberately not sourced from the report: a model that never saw
+// the truncated tail has no way to know a breaking change was in it, so asking
+// it to self-report the gap is asking the wrong witness.
+function applyConsistencyRules(report, { evidence = {} } = {}) {
   const reasons = [];
   if (report.classification === 'tests_only') {
     if (report.confidence !== 'high') reasons.push(`confidence is \`${report.confidence}\`, not \`high\``);
@@ -408,11 +424,15 @@ function applyConsistencyRules(report) {
       reasons.push(`${report.required_changes.length} required change(s) were reported`);
     }
     if (report.evidence_gaps.length) reasons.push(`${report.evidence_gaps.length} evidence gap(s) were reported`);
-    if (report.reviewed_areas.length < TESTS_ONLY_REQUIREMENTS.minReviewedAreas) {
-      reasons.push(`only ${report.reviewed_areas.length} area(s) were reviewed, fewer than ${TESTS_ONLY_REQUIREMENTS.minReviewedAreas}`);
+    const reviewedAreas = uniqueAreas(report.reviewed_areas);
+    if (reviewedAreas.length < TESTS_ONLY_REQUIREMENTS.minReviewedAreas) {
+      reasons.push(`only ${reviewedAreas.length} distinct area(s) were reviewed, fewer than ${TESTS_ONLY_REQUIREMENTS.minReviewedAreas}`);
     }
     if (report.validation_tasks.length < TESTS_ONLY_REQUIREMENTS.minValidationTasks) {
       reasons.push('no validation task was proposed');
+    }
+    for (const [flag, label] of TRUNCATION_REASONS) {
+      if (evidence[flag]) reasons.push(label);
     }
   } else if (report.classification === 'changes_required' && !report.required_changes.length) {
     reasons.push('the release was classified as `changes_required` but no required change was cited');
@@ -424,6 +444,24 @@ function applyConsistencyRules(report) {
     downgradeReason: reasons.join('; '),
   };
 }
+
+// Areas are free text, so `["cmake", "CMake ", "cmake"]` is one area claimed
+// three times. Counting entries would let a report clear the breadth bar
+// without having looked anywhere else.
+function uniqueAreas(areas) {
+  const seen = new Set();
+  for (const area of areas) {
+    const normalized = String(area || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (normalized) seen.add(normalized);
+  }
+  return [...seen];
+}
+
+const TRUNCATION_REASONS = Object.freeze([
+  ['notesTruncated', 'the release notes were truncated before the agent saw them'],
+  ['deltaTruncated', 'the release-note delta was truncated before the agent saw them'],
+  ['contextTruncated', 'the evidence bundle was truncated before the agent saw it'],
+]);
 
 function readReportFromAgentOutput(agentOutputPath) {
   if (!agentOutputPath || !fs.existsSync(agentOutputPath)) {
@@ -443,13 +481,13 @@ function readReportFromAgentOutput(agentOutputPath) {
   return validateReport(parseReportValue(reports[0].report));
 }
 
-function validateAgentOutput({ core, agentOutputPath, root }) {
+function validateAgentOutput({ core, agentOutputPath, root, evidence }) {
   const report = readReportFromAgentOutput(agentOutputPath);
   const citations = {
     required_changes: report.required_changes.map((finding) => validateCitation(root, finding)),
     optional_improvements: report.optional_improvements.map((finding) => validateCitation(root, finding)),
   };
-  const result = applyConsistencyRules(report);
+  const result = applyConsistencyRules(report, { evidence });
   if (result.downgraded) {
     core.warning(`Assessment downgraded to needs_review: ${result.downgradeReason}`);
   }
@@ -738,7 +776,7 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     throw new WatchError('Prepared context was built for a different assessment attempt.');
   }
 
-  const validated = validateAgentOutput({ core, agentOutputPath, root });
+  const validated = validateAgentOutput({ core, agentOutputPath, root, evidence: prepared.evidence });
   const runUrl = `${env.GITHUB_SERVER_URL || 'https://github.com'}/${owner}/${repo}/actions/runs/${env.GITHUB_RUN_ID}`;
 
   if (staged) {

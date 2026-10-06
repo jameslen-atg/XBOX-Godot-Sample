@@ -215,8 +215,8 @@ repository — mention them under optional improvements if they are worth doing.
   needs to be added to the supported lists and validated locally. This verdict
   can turn into a ready-to-apply support change, so it carries the highest bar:
   `high` confidence, zero required changes, zero evidence gaps, at least three
-  reviewed areas, and at least one validation task. If you cannot meet all of
-  those, use `needs_review`.
+  *distinct* reviewed areas, and at least one validation task. If you cannot
+  meet all of those, use `needs_review`.
 - `needs_review` — the notes are ambiguous, the evidence is incomplete, or you
   cannot rule out an impact. This is the correct answer when you are unsure.
 

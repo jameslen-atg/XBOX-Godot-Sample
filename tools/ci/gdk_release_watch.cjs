@@ -514,12 +514,41 @@ function evaluateTrustedContext({ context, env }) {
   return { trusted: true };
 }
 
+// `issues.create` does not reliably provision a label that does not exist yet,
+// and `listTrackingIssues` finds the durable queue *by* that label. An issue
+// created without it is invisible to every later run, which means a duplicate
+// issue and a duplicate model run for the same release.
+async function ensureTrackingLabel({ github, core, owner, repo }) {
+  try {
+    await github.rest.issues.getLabel({ owner, repo, name: TRACKING_LABEL });
+    return false;
+  } catch (error) {
+    if (error && error.status !== 404) throw error;
+  }
+  try {
+    await github.rest.issues.createLabel({
+      owner,
+      repo,
+      name: TRACKING_LABEL,
+      color: '1d76db',
+      description: 'Upstream GDK release tracked by the release watcher',
+    });
+    core.notice(`Created the \`${TRACKING_LABEL}\` label.`);
+    return true;
+  } catch (error) {
+    // A concurrent run may have won the race; anything else is a real failure.
+    if (error && error.status === 422) return false;
+    throw error;
+  }
+}
+
 async function ensureTrackingIssue({ github, core, owner, repo, release, baselineRelease, state, runUrl, existing, publish }) {
   if (existing) return { issue: existing, created: false };
   if (!publish) {
     core.info(`Preview: would open a tracking issue for GDK ${release.version}.`);
     return { issue: null, created: false };
   }
+  await ensureTrackingLabel({ github, core, owner, repo });
   const { data } = await github.rest.issues.create({
     owner,
     repo,
@@ -828,6 +857,7 @@ module.exports = {
   findSupportBaselineRelease,
   latestState,
   listTrackingIssues,
+  ensureTrackingLabel,
   listUpstreamReleases,
   markerPrefix,
   parseGdkTag,

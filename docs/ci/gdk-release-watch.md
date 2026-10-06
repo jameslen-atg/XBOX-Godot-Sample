@@ -70,7 +70,9 @@ Everything else is skipped with a reason recorded in the run summary.
    repository's checked-in support state.
 3. For the oldest unsupported release without a tracking issue, opens one,
    labelled `gdk-release`, holding the release identity, the current support
-   configuration, and an evidence fingerprint.
+   configuration, and an evidence fingerprint. The label is created first if the
+   repository does not have it yet — the queue is found *by* that label, so an
+   unlabelled issue would be re-created on every later run.
 4. Dispatches `gdk-release-assess.lock.yml` for that release.
 
 It queues at most one release per run, so a backlog drains one release per week
@@ -139,9 +141,19 @@ the CMake/vcpkg wiring, and the packaging tooling, and returns one of:
 `tests_only` is the only verdict that proposes a support change, so it carries
 the strictest bar. A report claiming `tests_only` is downgraded to
 `needs_review` unless it has `high` confidence, zero required changes, zero
-evidence gaps, at least three reviewed areas, and at least one validation task.
+evidence gaps, at least three *distinct* reviewed areas (repeating one area
+three times does not count), and at least one validation task.
 The downgrade and its reason are shown in the comment — a model cannot talk its
 way past it.
+
+Truncation is enforced the same way, but from the other side. The context
+builder records what it actually had to cut — the release notes, the
+release-note delta, or the whole evidence bundle — into `context.json`, and the
+publisher downgrades `tests_only` on that record alone. Asking the model to
+report the gap would be asking the wrong witness: a breaking change in the tail
+it never received is exactly the change it cannot warn about. A missing
+comparison baseline is tracked separately and does **not** downgrade, because it
+widens the delta rather than shortening it.
 
 ## The support change
 

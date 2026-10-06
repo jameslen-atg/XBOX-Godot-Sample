@@ -243,7 +243,7 @@ test('buildAssessmentContext fences untrusted notes and says the archive was not
 });
 
 test('buildAssessmentContext records truncation and a missing baseline as context notes', () => {
-  const { markdown, truncated, notes } = assess.buildAssessmentContext({
+  const { markdown, truncated, notes, evidence } = assess.buildAssessmentContext({
     release: RELEASE,
     baselineRelease: null,
     candidateBody: 'x'.repeat(200),
@@ -253,9 +253,31 @@ test('buildAssessmentContext records truncation and a missing baseline as contex
     limits: { ...assess.LIMITS, notesChars: 50, deltaChars: 50 },
   });
   assert.equal(truncated, true);
+  assert.deepEqual(
+    { notes: evidence.notesTruncated, delta: evidence.deltaTruncated, baseline: evidence.baselineMissing },
+    { notes: true, delta: true, baseline: true },
+  );
   assert.ok(notes.some((note) => /Release notes truncated/.test(note)));
   assert.ok(notes.some((note) => /No already-supported release exists/.test(note)));
   assert.match(markdown, /Comparison baseline: none/);
+});
+
+test('a missing baseline is not reported as truncated evidence', () => {
+  // A missing baseline widens the delta to the full release body; it is the
+  // opposite of evidence being cut off, and must not suppress `tests_only`.
+  const { evidence } = assess.buildAssessmentContext({
+    release: RELEASE,
+    baselineRelease: null,
+    candidateBody: 'short body',
+    baselineBody: '',
+    state: watch.readSupportState(ROOT),
+    sha: SHA,
+  });
+  assert.deepEqual(
+    [evidence.truncated, evidence.baselineMissing],
+    [false, true],
+  );
+  assert.equal(assess.applyConsistencyRules(baseReport({ classification: 'tests_only' }), { evidence }).downgraded, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -316,7 +338,7 @@ test('applyConsistencyRules downgrades every under-evidenced tests_only report',
     [{ confidence: 'medium' }, /confidence is `medium`/],
     [{ required_changes: [finding()] }, /1 required change\(s\) were reported/],
     [{ evidence_gaps: ['The notes do not mention XGameSave.'] }, /1 evidence gap\(s\) were reported/],
-    [{ reviewed_areas: ['cmake', 'addons/godot_gdk'] }, /only 2 area\(s\) were reviewed/],
+    [{ reviewed_areas: ['cmake', 'addons/godot_gdk'] }, /only 2 distinct area\(s\) were reviewed/],
     [{ validation_tasks: [] }, /no validation task was proposed/],
   ];
   for (const [overrides, expected] of cases) {
@@ -331,6 +353,31 @@ test('applyConsistencyRules reports every failed tests_only requirement at once'
   const result = assess.applyConsistencyRules(baseReport({ confidence: 'low', reviewed_areas: [], validation_tasks: [] }));
   assert.equal(result.report.classification, 'needs_review');
   assert.match(result.downgradeReason, /confidence is `low`.*reviewed.*no validation task/s);
+});
+
+test('applyConsistencyRules counts distinct reviewed areas, not entries', () => {
+  // Three entries, one area: repeating "cmake" is not breadth of review.
+  const duplicated = assess.applyConsistencyRules(baseReport({ reviewed_areas: ['cmake', 'CMake ', ' cmake'] }));
+  assert.equal(duplicated.report.classification, 'needs_review');
+  assert.match(duplicated.downgradeReason, /only 1 distinct area\(s\) were reviewed/);
+
+  const distinct = assess.applyConsistencyRules(baseReport({ reviewed_areas: ['cmake', 'godot_gdk', 'godot_gdk', 'docs'] }));
+  assert.equal(distinct.downgraded, false);
+});
+
+test('applyConsistencyRules downgrades tests_only when the trusted context was truncated', () => {
+  // The model cannot report a gap it never saw, so truncation comes from the
+  // context builder's own record rather than from the report.
+  for (const [flag, pattern] of [
+    ['notesTruncated', /release notes were truncated/],
+    ['deltaTruncated', /release-note delta was truncated/],
+    ['contextTruncated', /evidence bundle was truncated/],
+  ]) {
+    const result = assess.applyConsistencyRules(baseReport(), { evidence: { [flag]: true } });
+    assert.equal(result.report.classification, 'needs_review', flag);
+    assert.match(result.downgradeReason, pattern);
+  }
+  assert.equal(assess.applyConsistencyRules(baseReport(), { evidence: {} }).downgraded, false);
 });
 
 test('applyConsistencyRules downgrades an uncited changes_required report', () => {
@@ -592,6 +639,21 @@ function publishArgs(t, { report = baseReport(), env = {}, comments, contextOver
     supportUpdate,
   };
 }
+
+test('publishAssessment refuses tests_only when the recorded context was truncated', async (t) => {
+  // The tail the agent never saw could have held a breaking change, so the
+  // trusted context record — not the model's self-report — blocks the proposal.
+  const args = publishArgs(t, {
+    contextOverrides: { evidence: { notesTruncated: true, truncated: true } },
+    supportUpdate: async () => {
+      throw new Error('a truncated assessment must never reach the support updater');
+    },
+  });
+  const result = await assess.publishAssessment(args);
+
+  assert.equal(result.classification, 'needs_review');
+  assert.match(args.github.state.created[0].body, /release notes were truncated/);
+});
 
 test('publishAssessment posts the assessment and the resulting watcher state', async (t) => {
   const args = publishArgs(t, { report: baseReport({ classification: 'needs_review' }) });

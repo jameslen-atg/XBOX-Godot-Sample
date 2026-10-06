@@ -103,13 +103,15 @@ function fakeCore() {
   return core;
 }
 
-function fakeGithub({ releases = [], issues = [], comments = {} } = {}) {
+function fakeGithub({ releases = [], issues = [], comments = {}, labels = [] } = {}) {
   const state = {
     releases: releases.slice(),
     issues: issues.slice(),
     comments: { ...comments },
+    labels: labels.slice(),
     createdIssues: [],
     createdComments: [],
+    createdLabels: [],
     dispatches: [],
     nextIssue: 100,
     nextComment: 9000,
@@ -122,6 +124,19 @@ function fakeGithub({ releases = [], issues = [], comments = {} } = {}) {
         listReleases: async ({ page }) => ({ data: page === 1 ? state.releases : [] }),
       },
       issues: {
+        getLabel: async ({ name }) => {
+          if (!state.labels.includes(name)) {
+            const error = new Error('Not Found');
+            error.status = 404;
+            throw error;
+          }
+          return { data: { name } };
+        },
+        createLabel: async ({ name }) => {
+          state.labels.push(name);
+          state.createdLabels.push(name);
+          return { data: { name } };
+        },
         listForRepo: async () => ({ data: state.issues.slice() }),
         listComments: async ({ issue_number: number }) => ({ data: (state.comments[number] || []).slice() }),
         create: async ({ title, body, labels }) => {
@@ -581,6 +596,53 @@ test('runWatch opens one tracking issue per release but dispatches only one asse
   assert.equal(dispatch.inputs.attempt, '555');
   assert.equal(watch.parseStateComment(stateComment.body).attempt, '555');
   assert.equal(core.outputs.dispatched, '1');
+});
+
+test('runWatch provisions the tracking label before the first issue is opened', async () => {
+  // `listTrackingIssues` finds the durable queue by label. An issue created
+  // without it is invisible on the next run, producing duplicate issues and
+  // duplicate model runs for the same release.
+  const github = fakeGithub({ releases: watchReleases() });
+  await watch.runWatch({
+    github,
+    context: CONTEXT,
+    core: fakeCore(),
+    env: { ...TRUSTED_ENV },
+    root: makeSupportFixture(),
+  });
+
+  assert.deepEqual(github.state.createdLabels, ['gdk-release'], 'the missing label is created exactly once');
+  for (const issue of github.state.createdIssues) {
+    assert.deepEqual(issue.labels.map((label) => label.name), ['gdk-release']);
+  }
+});
+
+test('ensureTrackingLabel leaves an existing label alone and tolerates a concurrent create', async () => {
+  const existing = fakeGithub({ labels: ['gdk-release'] });
+  assert.equal(
+    await watch.ensureTrackingLabel({ github: existing, core: fakeCore(), owner: OWNER, repo: REPO }),
+    false,
+  );
+  assert.deepEqual(existing.state.createdLabels, []);
+
+  const raced = fakeGithub();
+  raced.rest.issues.createLabel = async () => {
+    const error = new Error('Validation Failed');
+    error.status = 422;
+    throw error;
+  };
+  assert.equal(await watch.ensureTrackingLabel({ github: raced, core: fakeCore(), owner: OWNER, repo: REPO }), false);
+
+  const broken = fakeGithub();
+  broken.rest.issues.getLabel = async () => {
+    const error = new Error('Bad credentials');
+    error.status = 401;
+    throw error;
+  };
+  await assert.rejects(
+    () => watch.ensureTrackingLabel({ github: broken, core: fakeCore(), owner: OWNER, repo: REPO }),
+    /Bad credentials/,
+  );
 });
 
 test('runWatch drains the whole backlog only when asked', async () => {
