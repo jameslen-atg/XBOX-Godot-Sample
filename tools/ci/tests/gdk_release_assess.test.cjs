@@ -489,7 +489,12 @@ test('renderAssessmentComment carries the marker, the caveat and permalinked cit
   );
   const body = render({ agentOutputPath });
 
-  assert.match(body, new RegExp(`^<!-- xbox-godot-gdk-release-assessment id=${RELEASE.id} sha=${SHA} attempt=preview -->`));
+  assert.match(
+    body,
+    new RegExp(
+      `^<!-- xbox-godot-gdk-release-assessment id=${RELEASE.id} sha=${SHA} attempt=preview classification=changes_required -->`,
+    ),
+  );
   assert.match(body, /\*\*The SDK archive was not downloaded\*\*/);
   assert.match(body, /Classification:\*\* 🛠️ Changes required/);
   assert.ok(body.includes(`https://github.com/microsoft/XBOX-Godot-Sample/blob/${SHA}/${CITED_PATH}#L1-L3`));
@@ -717,6 +722,44 @@ test('publishAssessment is idempotent when a report for this attempt already exi
   assert.equal(result.repaired, true);
   assert.equal(args.github.state.created.length, 1);
   assert.match(args.github.state.created[0].body, /recovered: this attempt had already posted its report/);
+});
+
+test('a repaired ledger entry records the verdict of the report it links to', async (t) => {
+  // 555 posted a `changes_required` report and died before writing its terminal
+  // state. Re-running it re-invokes the agent, which this time concludes
+  // `tests_only` — but that report is never posted; the comment on the issue
+  // still says changes are required. Stamping the rerun's verdict would leave
+  // the ledger claiming tests-only while linking a changes-required report.
+  const existing = {
+    id: 9,
+    user: { login: BOT },
+    html_url: 'https://example.test/comment/9',
+    body: `<!-- xbox-godot-gdk-release-assessment id=${RELEASE.id} sha=${SHA} attempt=555 classification=changes_required -->\n## existing`,
+  };
+  const args = publishArgs(t, { comments: [stateComment('assessment-dispatched'), existing] });
+  const result = await assess.publishAssessment(args);
+
+  assert.equal(result.repaired, true);
+  assert.equal(result.classification, 'changes_required');
+  assert.match(args.github.state.created[0].body, /"status": "changes-required"/);
+  assert.ok(
+    args.core.warnings.some((line) => /posted report says `changes_required`/.test(line)),
+    'the divergence must be visible on the run',
+  );
+});
+
+test('classificationOfReport reads the marker and refuses anything else', () => {
+  const marker = (value) =>
+    `<!-- xbox-godot-gdk-release-assessment id=1 sha=${SHA} attempt=555 classification=${value} -->\n## body`;
+  assert.equal(assess.classificationOfReport({ body: marker('needs_review') }), 'needs_review');
+  assert.equal(assess.classificationOfReport({ body: marker('tests_only') }), 'tests_only');
+  assert.equal(assess.classificationOfReport({ body: marker('made_up') }), null);
+  // Reports posted before the marker carried a classification.
+  assert.equal(
+    assess.classificationOfReport({ body: `<!-- xbox-godot-gdk-release-assessment id=1 sha=${SHA} attempt=555 -->` }),
+    null,
+  );
+  assert.equal(assess.classificationOfReport(null), null);
 });
 
 test('a report from an earlier attempt does not suppress a retry', async (t) => {

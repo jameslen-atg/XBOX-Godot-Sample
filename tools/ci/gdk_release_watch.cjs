@@ -72,6 +72,23 @@ const TAG_PATTERN = /^([A-Za-z]+)-(20\d{2})(?:-Update-(\d{1,2}))?-v(\d{4})\.(\d{
 // tooling, for example) ship alongside it and are ignored.
 const SDK_ASSET_PATTERN = /^GDK_(\d{4})\.(\d{1,2})\.(\d{1,6})\.zip$/i;
 
+// Upstream release titles are free-form text controlled by the publisher and are
+// rendered into Markdown tables and into the assessor's prompt. Collapse them to
+// a single bounded line so a crafted title cannot break out of a table row or
+// introduce a line that reads like an instruction to the agent. Backticks become
+// apostrophes so the result is always safe inside a code span.
+const MAX_TITLE_CHARS = 200;
+
+function sanitizeReleaseTitle(raw) {
+  const collapsed = String(raw ?? '')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+    .replace(/`/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (collapsed.length <= MAX_TITLE_CHARS) return collapsed;
+  return `${collapsed.slice(0, MAX_TITLE_CHARS - 1).trimEnd()}\u2026`;
+}
+
 const ASSESSMENT_STATUSES = Object.freeze([
   'awaiting-assessment',
   'assessment-dispatched',
@@ -145,7 +162,7 @@ function classifyRelease(release) {
   if (!parsed) return { status: 'ignored', reason: 'not a versioned public GDK release tag' };
   if (parsed.conflict) return { status: 'conflict', reason: parsed.conflict };
 
-  const name = String(release.name || '');
+  const name = sanitizeReleaseTitle(release.name);
   if (!/\bGDK\b/i.test(name)) {
     return { status: 'conflict', reason: `release title ${JSON.stringify(name)} does not identify a GDK release` };
   }
@@ -342,7 +359,8 @@ function renderTrackingIssueBody({ release, baselineRelease, state, runUrl }) {
     '',
     '| Field | Value |',
     '| --- | --- |',
-    `| Upstream release | [${release.name}](${release.url}) |`,
+    `| Upstream release | \`${release.name}\` |`,
+    `| Release page | ${release.url} |`,
     `| Tag | \`${release.tag}\` |`,
     `| Port version | \`${release.version}\` |`,
     `| Edition | \`${release.edition}\` |`,
@@ -475,9 +493,16 @@ function readWatchInputs(env) {
   const inputs = raw && typeof raw === 'object' ? raw : {};
   const tag = String(inputs.release_tag || '').trim();
   if (tag && !TAG_PATTERN.test(tag)) throw new WatchError(`release_tag ${JSON.stringify(tag)} is not a GDK release tag.`);
+  const retry = inputs.retry === true || inputs.retry === 'true';
+  // Retry re-dispatches a paid model run and overrides the terminal-state guard,
+  // so it must name exactly one release. Without a tag it would combine with
+  // drain_backlog to reassess every already-settled release in the backlog.
+  if (retry && !tag) {
+    throw new WatchError('retry requires release_tag: name the single release to reassess.');
+  }
   return {
     releaseTag: tag || null,
-    retry: inputs.retry === true || inputs.retry === 'true',
+    retry,
     drainBacklog: inputs.drain_backlog === true || inputs.drain_backlog === 'true',
     preview: inputs.preview === true || inputs.preview === 'true',
   };
@@ -854,6 +879,7 @@ module.exports = {
   renderTrackingIssueBody,
   renderTrackingIssueTitle,
   runWatch,
+  sanitizeReleaseTitle,
   selectBacklog,
   staleAttemptStatus,
   stateMarkerPrefix,

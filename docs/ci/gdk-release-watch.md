@@ -28,7 +28,7 @@ answer sooner.
 | `tools/ci/gdk_release_watch.cjs` | Deterministic discovery: release parsing, edition math, support state, backlog selection, and the tracking-issue ledger. |
 | `tools/ci/gdk_release_assess.cjs` | Deterministic assessment half: evidence bundle, report validation, consistency rules, rendering, and publishing. |
 | `tools/ci/tests/gdk_release_*.test.cjs` | `node:test` suites for both helpers. |
-| `.github/workflows/gdk-release-checks.yml` | PR/push checks: helper tests and lock-file drift. |
+| `.github/workflows/pr-gates.yml` (`gdk-watch` job) | PR/push checks: helper tests and lock-file drift, selected by `tools/ci/pr_gate_scope.cjs` and aggregated into the required `PR gates` check. |
 
 The agent is read-only. It cannot edit files, open issues, or open pull
 requests; it emits one JSON report and the helpers above decide what is
@@ -151,7 +151,7 @@ Run **GDK Release Watch** from the Actions tab:
 | Input | Effect |
 | ----- | ------ |
 | `release_tag` | Act on exactly this tag instead of the oldest release awaiting assessment. |
-| `retry` | Assess again even though the release already has a report. Reports are snapshots, so this is the only way to refresh one. |
+| `retry` | Assess again even though the release already has a report. Reports are snapshots, so this is the only way to refresh one. **Requires `release_tag`**: a retry spends a model run and overrides the terminal-state guard, so it has to name one release. The run fails fast if it is set alone. |
 | `drain_backlog` | Dispatch an assessment for every release awaiting one, not just the oldest. |
 | `preview` | Report only. No issue, comment, or dispatch is written. |
 
@@ -264,8 +264,8 @@ node --test tools/ci/tests/gdk_release_watch.test.cjs tools/ci/tests/gdk_release
 gh aw compile gdk-release-assess --strict
 ```
 
-The compile step needs the pinned gh-aw version recorded in
-`.github/workflows/gdk-release-checks.yml`; a mismatch shows up as lock-file
-drift in CI.
+The compile step needs the pinned gh-aw version recorded in the `gdk-watch` job
+of `.github/workflows/pr-gates.yml`; a mismatch shows up as lock-file drift in
+CI.
 
 [gdk-releases]: https://github.com/microsoft/GDK/releases
