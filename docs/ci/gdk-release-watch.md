@@ -1,14 +1,15 @@
 # GDK release watch
 
 Microsoft publishes new GDK releases to [microsoft/GDK][gdk-releases] on its own
-cadence. This automation notices them, asks an AI agent what the release means
-for this repository, and files a tracking issue. When a release turns out to
-need nothing but revalidation, the issue also carries a complete, ready-to-apply
-task: the exact files, the exact values, and the local validation a human has to
-run. Assign that issue to GitHub Copilot and it produces the draft pull request.
+cadence. This automation notices them, asks a read-only AI agent what the release
+means for this repository, and files a tracking issue holding that assessment and
+a brief describing the work it implies.
 
-Nothing here merges anything, and nothing here edits addon source. The issue and
-everything in it are proposals for a human.
+The assessment is **advice, not a patch**. It names the files to change and the
+questions to answer; it never derives exact values, never opens a branch, and
+never opens a pull request. Assign the tracking issue to GitHub Copilot or pick
+it up yourself, re-check the report against current `main`, and produce a draft
+pull request for a human to validate against a real SDK.
 
 ## Why a schedule and not a release trigger
 
@@ -24,10 +25,9 @@ answer sooner.
 | `.github/workflows/gdk-release-watch.yml` | Scheduled + manually dispatched watcher. Finds unsupported releases, opens or updates tracking issues, and dispatches the assessor. |
 | `.github/workflows/gdk-release-assess.md` | [GitHub Agentic Workflow](https://github.github.com/gh-aw/) source for the assessor: trigger, permissions, tools, the agent instructions, and the publisher job. |
 | `.github/workflows/gdk-release-assess.lock.yml` | Compiled workflow that Actions actually runs. Generated; never hand-edit. |
-| `tools/ci/gdk_release_watch.cjs` | Deterministic discovery: release parsing, edition math, support state, backlog selection, the evidence fingerprint, and the tracking-issue ledger. |
+| `tools/ci/gdk_release_watch.cjs` | Deterministic discovery: release parsing, edition math, support state, backlog selection, and the tracking-issue ledger. |
 | `tools/ci/gdk_release_assess.cjs` | Deterministic assessment half: evidence bundle, report validation, consistency rules, rendering, and publishing. |
-| `tools/ci/gdk_support_update.cjs` | Deterministic support-list updater: vcpkg registry lookup, bounded config edits, and the assignable task body (or, if ever enabled, the draft pull request). |
-| `tools/ci/tests/gdk_*.test.cjs` | `node:test` suites for all three helpers. |
+| `tools/ci/tests/gdk_release_*.test.cjs` | `node:test` suites for both helpers. |
 | `.github/workflows/gdk-release-checks.yml` | PR/push checks: helper tests and lock-file drift. |
 
 The agent is read-only. It cannot edit files, open issues, or open pull
@@ -68,63 +68,81 @@ Everything else is skipped with a reason recorded in the run summary.
    ordered by version, so `/releases/latest` and watermarks are both unsafe.
 2. Partitions them into supported, unsupported, and ignored against this
    repository's checked-in support state.
-3. For the oldest unsupported release without a tracking issue, opens one,
-   labelled `gdk-release`, holding the release identity, the current support
-   configuration, and an evidence fingerprint. The label is created first if the
-   repository does not have it yet — the queue is found *by* that label, so an
-   unlabelled issue would be re-created on every later run.
-4. Dispatches `gdk-release-assess.lock.yml` for that release.
+3. Opens a tracking issue, labelled `gdk-release`, for **every** unsupported
+   release that does not have one yet, holding the release identity and the
+   current support configuration. The label is created first if the repository
+   does not have it yet — the queue is found *by* that label, so an unlabelled
+   issue would be re-created on every later run.
+4. Dispatches `gdk-release-assess.lock.yml` for the oldest release that has no
+   assessment yet.
 
-It queues at most one release per run, so a backlog drains one release per week
-unless you dispatch it manually with `drain_backlog`. Tracking issues are the
-durable queue: a bot-authored issue carries the release id, the last assessment
-status, and the fingerprint of the evidence that status was based on. The
-fingerprint covers the upstream release notes, the baseline notes the delta is
-computed against, this repository's support lists, and a content digest of the
-source the agent is told to review — `addons/godot_gdk`, `addons/godot_gameinput`,
-`addons/godot_playfab`, `addons/godot_gdk_editortools`, `cmake`, and `tools`,
-minus build and restore output. If any of that changes, the fingerprint changes
-and the release is reassessed; a report always describes a known snapshot of
-this repository rather than whatever `main` happens to hold now. Cosmetic
-upstream metadata edits — a retitled release, a new publication timestamp — do
-not change it, so they never burn another model run.
+Issues are cheap, so the watcher files all of them; assessments cost a model run,
+so it queues **one** per run. A backlog therefore drains one assessment per week
+unless you dispatch it manually with `drain_backlog`.
 
-If you add a reviewed area to the agent prompt in
-`.github/workflows/gdk-release-assess.md`, add it to `REVIEWED_SOURCE_PATHS` in
-`tools/ci/gdk_release_watch.cjs` as well. An area the agent reviews but the
-fingerprint ignores is a source of silently stale assessments.
+Tracking issues are the durable queue: a bot-authored issue carries the release
+id and the last assessment status in bot-authored state comments.
 
-If an assessor run dies without posting a report — a rejected dispatch, a
-crashed agent, a blocked safe output — its ledger entry would otherwise read
+### Reports are snapshots
+
+A published report describes this repository as it stood at one commit, named in
+the report. It is never refreshed automatically — not when `main` moves, not when
+the upstream release notes are edited, not on the next weekly run. A release that
+already has a terminal status (`changes-required`, `tests-only`, `needs-review`,
+`assessment-failed`) is skipped by every later run.
+
+That is deliberate. A report is read once, by whoever picks the issue up, and
+the brief tells them to re-check it against current `main` before acting. Paying
+for a fresh model run every time an unrelated file changes would buy a fresher
+timestamp and no new decision.
+
+When you *do* want a fresh read — the repository has moved materially, or the
+earlier report was wrong — ask for one explicitly: run **GDK Release Watch** with
+`release_tag` set to that release and `retry` enabled. The new report is posted
+alongside the old one, so the history of what was decided and when stays on the
+issue. Closing the tracking issue is how you tell the watcher to drop a release
+for good: a closed issue is never reassessed, retry or not.
+
+### When an assessment does not come back
+
+If an assessor run dies without posting a report — a rejected dispatch, a crashed
+agent, a blocked safe output — its ledger entry would otherwise read
 `assessment-dispatched` forever. The watcher treats such an entry as in flight
 for six hours; past that it writes an `assessment-failed` state closing the dead
-attempt out and re-queues the release behind never-attempted work. A dispatch
-that fails outright is recorded the same way before the error is re-raised, so a
-failed run is always visible in both the Actions log and the tracking issue.
+attempt out, and raises a warning on the run naming the exact retry to run.
 
-Each dispatch also carries an **attempt id** — the watcher run *and run attempt*
-that queued it — as a workflow input. Both halves matter: re-running a watcher
-workflow preserves `GITHUB_RUN_ID` and only increments `GITHUB_RUN_ATTEMPT`, so
-a run-id-only key would hand the re-run the previous attempt's identity. The
-assessor never re-derives that id from the ledger,
-because an explicit retry re-queues the *same* evidence under a *new* watcher
-run: a slow assessor reading the ledger at publish time would otherwise adopt
-the retry's id and settle it with an older report. An assessor that finds a
-different attempt in flight refuses to publish and lets the retry win. Both
-terminal states preserve the queuing watcher run and record the assessor run
-separately as `assessorRunUrl`, so re-running a finished assessor recognises its
-own report instead of posting a duplicate.
+It does **not** re-queue the release. An attempt that died on this release would
+keep dying on it, unattended, every week, and each death costs a model run.
+Recovery is a deliberate act: re-run **GDK Release Watch** with `release_tag` and
+`retry: true`. Both the warning and the `assessment-failed` comment spell that
+command out, so no internal identifier has to be copied anywhere.
 
-Because the attempt id is the only thing that separates two dispatches over
-identical evidence, it cannot be reconstructed. Dispatching the assessor
-directly therefore requires copying the `attempt` value out of the in-flight
-state comment on the tracking issue; a run that omits it renders its staged
-preview and then refuses to post. The ledger is re-read and re-validated after
-the support-change lookup — the longest step in the publish path — so a retry
-queued during that lookup stops the older run before it posts rather than after.
-GitHub comments have no compare-and-swap, so a narrow window remains between
-that final read and the write; the six-hour staleness sweep above is what
-recovers a retry that loses it.
+A dispatch that fails outright is recorded the same way before the error is
+re-raised, so a failed run is always visible in both the Actions log and the
+tracking issue.
+
+### Attempt ids
+
+Each dispatch carries an **attempt id** — the watcher run *and run attempt* that
+queued it — as a workflow input. Both halves matter: re-running a watcher
+workflow preserves `GITHUB_RUN_ID` and only increments `GITHUB_RUN_ATTEMPT`, so a
+run-id-only key would hand the re-run the previous attempt's identity. The
+assessor never re-derives that id from the ledger, because a retry re-queues the
+same release under a new watcher run: a slow assessor reading the ledger at
+publish time would otherwise adopt the retry's id and settle it with an older
+report. An assessor that finds a different attempt in flight, or finds the
+release already settled, refuses to publish and lets the retry win. Both terminal
+states preserve the queuing watcher run and record the assessor run separately as
+`assessorRunUrl`, so re-running a finished assessor recognises its own report
+instead of posting a duplicate.
+
+Because the attempt id cannot be reconstructed, dispatching the assessor
+*directly* requires copying the `attempt` value out of the in-flight state
+comment on the tracking issue; a run that omits it renders its staged preview and
+then refuses to post. Going through the watcher — the supported path — never
+requires that. GitHub comments have no compare-and-swap, so a narrow window
+remains between the final ledger read and the write; the six-hour staleness sweep
+above is what recovers a retry that loses it.
 
 ### Manual dispatch
 
@@ -132,10 +150,10 @@ Run **GDK Release Watch** from the Actions tab:
 
 | Input | Effect |
 | ----- | ------ |
-| `release_tag` | Assess exactly this tag instead of the oldest unsupported release. |
-| `retry` | Reassess even if the release already has a completed assessment. |
-| `drain_backlog` | Queue every unsupported release, not just the oldest. |
-| `preview` | Report only. No issue, comment, dispatch, or pull request is written. |
+| `release_tag` | Act on exactly this tag instead of the oldest release awaiting assessment. |
+| `retry` | Assess again even though the release already has a report. Reports are snapshots, so this is the only way to refresh one. |
+| `drain_backlog` | Dispatch an assessment for every release awaiting one, not just the oldest. |
+| `preview` | Report only. No issue, comment, or dispatch is written. |
 
 `preview` is the safe way to see what the watcher currently thinks; the summary
 table lands in the run summary.
@@ -147,14 +165,19 @@ repository's current support configuration, the release notes delta against the
 closest supported release, and the full notes. It reviews the addon surfaces,
 the CMake/vcpkg wiring, and the packaging tooling, and returns one of:
 
-| Classification | Meaning | Result |
-| -------------- | ------- | ------ |
-| `changes_required` | A concrete call site, build setting, or packaging flow has to change. Every required change cites a real file and line range. | Assessment comment on the tracking issue. |
-| `tests_only` | Nothing in this repository needs to change; the release only needs to be added to the supported lists and validated. | Assessment comment **plus** a ready-to-apply support task. |
-| `needs_review` | The notes are ambiguous or the evidence is incomplete. | Assessment comment asking for a human read. |
+| Classification | Meaning | What the brief asks for |
+| -------------- | ------- | ----------------------- |
+| `changes_required` | A concrete call site, build setting, or packaging flow has to change. Every required change cites a real file and line range. | Re-verify each cited location against current `main`, make the change, then add the edition to the support lists. |
+| `tests_only` | Nothing in this repository needs to change; the release only needs to be added to the supported lists and validated. | Add the edition to the support lists only. |
+| `needs_review` | The notes are ambiguous or the evidence is incomplete. | Close the named evidence gaps by hand before any support-list edit. |
 
-`tests_only` is the only verdict that proposes a support change, so it carries
-the strictest bar. A report claiming `tests_only` is downgraded to
+Every verdict produces the same thing: one assessment comment on the tracking
+issue, carrying the report and an implementation brief. No verdict produces a
+branch, a diff, or a pull request.
+
+`tests_only` is the weakest claim to make from release notes alone — it asserts
+that nothing anywhere in the repository is affected — so it carries the strictest
+bar. A report claiming `tests_only` is downgraded to
 `needs_review` unless it has `high` confidence, zero required changes, zero
 evidence gaps, at least three *distinct* reviewed areas (repeating one area
 three times does not count), and at least one validation task.
@@ -170,45 +193,45 @@ it never received is exactly the change it cannot warn about. A missing
 comparison baseline is tracked separately and does **not** downgrade, because it
 widens the delta rather than shortening it.
 
-## The support change
+## The implementation brief
 
-This repository does not allow GitHub Actions to create pull requests, so the
-automation does not try. For a `tests_only` verdict it derives the change
-deterministically and renders it into the assessment comment under
-**Proposed support change — assign this issue to complete it**. Assign the
-tracking issue to GitHub Copilot (or do it by hand) and the task body is the
-whole brief: it is written to stand alone, because the coding agent may see
-nothing but the issue.
+This repository does not allow GitHub Actions to create pull requests, and the
+automation does not try to work around that. Every assessment comment ends with
+**How to pick this up** — a self-contained brief, written to stand alone because
+a coding agent may see nothing but the issue. Assign the tracking issue to GitHub
+Copilot, or take it yourself.
 
-The derived change edits **only** these files:
+The brief always says the same five things:
 
-- `cmake/GDKDependencies.cmake` — adds the edition to `GDK_SUPPORTED_VERSIONS`.
-- `.github/gdk-versions.json` — adds the hosted vcpkg entry, when the port
-  exists in the public registry.
-- `vcpkg-configuration.json` — moves the registry baseline, when a newer one is
-  needed to resolve the port.
-- `vcpkg.json` — only if the manifest needs the new version. An `ms-gdk`
-  override left behind by an earlier proposal is always realigned, because an
-  override beats the registry baseline: a stale pin silently resolves the old
-  SDK no matter what the hosted default says.
+1. Re-read the upstream release and re-check the report against current `main`.
+   The report names the commit it describes; if the repository has moved, derive
+   the change from what is there now.
+2. Do the work the verdict implies (the right-hand column of the table above).
+3. Add the edition to the supported-version lists, keeping every existing entry:
+   - `cmake/GDKDependencies.cmake` — the allowlist of editions an installed GDK
+     may satisfy.
+   - `.github/gdk-versions.json` — the hosted vcpkg matrix CI restores from.
+   - `vcpkg-configuration.json` — the registry baseline that pins which port
+     versions are resolvable.
+   - `vcpkg.json` — the `ms-gdk` version override.
 
-Each file is listed with its current value and its required value, so a stale
-"current" value is a visible signal that main has moved and the change must be
-re-derived rather than forced in. If the public vcpkg registry has no `ms-gdk`
-port for the release yet, the task covers the installed-GDK path only and says
-so.
+   The vcpkg files only change if `ms-gdk <version>` is actually published in the
+   public vcpkg registry. The brief says to check; the automation does not look,
+   because the answer at pick-up time is the only one that matters.
+4. Open a **draft** pull request filling in `.github/PULL_REQUEST_TEMPLATE.md`,
+   stating under **Validation** that nothing has been run.
+5. Hand it to a maintainer to build and test against the real SDK.
 
-A servicing update from an older family never becomes the hosted default, so its
-validation commands pin the candidate through the `ms-gdk` override first and
-restore the committed default afterwards. Without that, `cmake --preset default`
-would build the newer SDK and prove nothing about the release under review.
+The brief is deliberately a list of files and questions rather than a diff. Exact
+values — which baseline, which override, whether the port exists — depend on the
+repository at pick-up time, not on the snapshot the report describes. A generated
+patch would look authoritative and be wrong whenever `main` had moved, and the
+assignee has to open those files anyway.
 
-The task also tells the agent, in as many words, that it **cannot** validate the
-change — building needs Windows and an installed GDK — and that it must open the
-pull request as a draft that honestly records validation as not yet run. The
-exact local validation commands for the edition are included verbatim; they
-differ between the installed-GDK and hosted-vcpkg paths. **Nothing in this
-automation ever runs them.**
+It also tells the assignee, in as many words, that they **cannot** validate the
+change: proving support means building on Windows against an installed GDK, which
+no hosted agent can do. **Nothing in this automation ever runs a build or a
+test.**
 
 ## Posting and staged mode
 
@@ -222,24 +245,10 @@ trusted context the watcher checks — target repository, `refs/heads/main` — 
 stages instead of posting anywhere else. A fork or feature-branch run therefore
 produces a job summary and nothing else, whatever `GDK_ASSESS_MODE` says.
 
-`GDK_SUPPORT_PROPOSAL_MODE` controls how the support change is handed off:
-
-| Value | Behaviour |
-| ----- | --------- |
-| `issue` (default) | Render the change as an assignable task in the assessment comment. No branch, no pull request, no write beyond the comment. |
-| `pull-request` | Push `automation/gdk-<version>-<id>` and open a draft pull request. |
-
-`pull-request` additionally needs `contents: write` and `pull-requests: write`
-restored on the `post-gdk-assessment` job **and** **Allow GitHub Actions to
-create and approve pull requests** enabled in the repository's Actions settings.
-Flip both or neither; the job is deliberately shipped with neither. If the mode
-is on but a permission is missing, the publisher detects the permission error,
-falls back to the assignable task, and still posts the assessment rather than
-losing it.
-
-Do not add a personal access token or a GitHub App to work around the setting.
-The change exists to be reviewed by a human, and a token with more authority
-does not change that.
+The publisher needs `issues: write` and nothing more. Do not add `contents:
+write`, `pull-requests: write`, a personal access token, or a GitHub App to make
+the automation open the pull request itself. The change exists to be reviewed by
+a human, and a token with more authority does not change that.
 
 ## Changing the supported floor
 
@@ -251,7 +260,7 @@ work on the older family. Update this page in the same change.
 ## Local checks
 
 ```powershell
-node --test tools/ci/tests/gdk_release_watch.test.cjs tools/ci/tests/gdk_release_assess.test.cjs tools/ci/tests/gdk_support_update.test.cjs
+node --test tools/ci/tests/gdk_release_watch.test.cjs tools/ci/tests/gdk_release_assess.test.cjs
 gh aw compile gdk-release-assess --strict
 ```
 

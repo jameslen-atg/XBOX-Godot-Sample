@@ -11,7 +11,6 @@ const watch = require('../gdk_release_watch.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..', '..');
 const SHA = 'a'.repeat(40);
-const FINGERPRINT = '1'.repeat(64);
 const BOT = 'github-actions[bot]';
 
 const RELEASE = Object.freeze({
@@ -110,7 +109,6 @@ function writeContext(dir, overrides = {}) {
     repo: 'microsoft/XBOX-Godot-Sample',
     issue: 321,
     sha: SHA,
-    fingerprint: FINGERPRINT,
     release: RELEASE,
     baseline: BASELINE,
     ...overrides,
@@ -130,21 +128,20 @@ function assessEnv(overrides = {}) {
       release_id: String(RELEASE.id),
       release_tag: RELEASE.tag,
       issue_number: 321,
-      evidence_fingerprint: FINGERPRINT,
       attempt: '555',
     }),
     ...overrides,
   };
 }
 
-function stateComment(status, { fingerprint = FINGERPRINT, login = BOT, runId = 555, attempt = '555' } = {}) {
+function stateComment(status, { login = BOT, runId = 555, attempt = '555' } = {}) {
   return {
     id: 1,
     user: { login },
     html_url: 'https://example.test/comment/1',
     body: watch.renderStateComment({
       releaseId: RELEASE.id,
-      state: { status, fingerprint, runId, attempt, at: '2026-05-01T00:00:00Z' },
+      state: { status, runId, attempt, at: '2026-05-01T00:00:00Z' },
     }),
   };
 }
@@ -174,7 +171,7 @@ const CONTEXT = { repo: { owner: 'microsoft', repo: 'XBOX-Godot-Sample' } };
 
 test('readAssessInputs requires a fully identified dispatch', () => {
   const inputs = assess.readAssessInputs(assessEnv());
-  assert.deepEqual(inputs, { releaseId: '4242', releaseTag: RELEASE.tag, issueNumber: 321, fingerprint: FINGERPRINT, attempt: '555' });
+  assert.deepEqual(inputs, { releaseId: '4242', releaseTag: RELEASE.tag, issueNumber: 321, attempt: '555' });
 
   const without = (key) => {
     const parsed = JSON.parse(assessEnv().GDK_ASSESS_INPUTS);
@@ -183,8 +180,13 @@ test('readAssessInputs requires a fully identified dispatch', () => {
   };
   assert.throws(() => assess.readAssessInputs(without('release_id')), /release_id must be a numeric release id/);
   assert.throws(() => assess.readAssessInputs(without('issue_number')), /issue_number must be a positive integer/);
-  assert.throws(() => assess.readAssessInputs(without('evidence_fingerprint')), /sha256 hex digest/);
   assert.throws(() => assess.readAssessInputs({ GDK_ASSESS_INPUTS: '{' }), /not valid JSON/);
+  // A staged preview may run without an attempt; posting without one cannot.
+  assert.equal(assess.readAssessInputs(without('attempt')).attempt, null);
+  assert.throws(
+    () => assess.readAssessInputs({ ...assessEnv(), GDK_ASSESS_INPUTS: JSON.stringify({ ...JSON.parse(assessEnv().GDK_ASSESS_INPUTS), attempt: 'a -->b' }) }),
+    /attempt/,
+  );
   assert.equal(assess.readAssessInputs({ ...assessEnv(), GDK_ASSESS_INPUTS: JSON.stringify({ ...JSON.parse(assessEnv().GDK_ASSESS_INPUTS), release_tag: '' }) }).releaseTag, null);
 });
 
@@ -475,7 +477,6 @@ function render(overrides = {}) {
     repo: 'XBOX-Godot-Sample',
     sha: SHA,
     runUrl: 'https://example.test/run',
-    pullRequestUrl: null,
     ...overrides.render,
   });
 }
@@ -508,43 +509,46 @@ test('renderAssessmentComment renders untrusted model text inertly', (t) => {
   assert.ok(body.includes('\\[click\\](javascript:'), 'the link text survives, inert');
 });
 
-test('renderAssessmentComment explains a downgrade and that no pull request was opened', (t) => {
+test('renderAssessmentComment explains a downgrade and keeps the report advisory', (t) => {
   const dir = tempDir(t);
   const agentOutputPath = writeAgentOutput(dir, baseReport({ confidence: 'medium' }));
   const body = render({ agentOutputPath });
   assert.match(body, /\[!WARNING\]/);
   assert.match(body, /reported `tests_only`, which was downgraded to `needs_review`/);
-  assert.match(body, /No support change was proposed/);
+  assert.match(body, /Resolve that before acting on the report/);
   assert.match(body, /Classification:\*\* 🔍 Needs human review/);
 });
 
-test('renderAssessmentComment carries the support change however it was handed off', (t) => {
+test('every verdict carries an implementation brief an assignee can act on', (t) => {
   const dir = tempDir(t);
-  const agentOutputPath = writeAgentOutput(dir, baseReport());
-  const linked = render({ agentOutputPath, render: { pullRequestUrl: 'https://example.test/pull/7' } });
-  assert.match(linked, /A draft pull request is open for local validation: https:\/\/example\.test\/pull\/7/);
+  const briefFor = (overrides) => render({ agentOutputPath: writeAgentOutput(dir, baseReport(overrides)) });
 
-  // The repository does not allow Actions to open pull requests, so the normal
-  // path is the assignable task. It must survive into the comment verbatim.
-  const assigned = render({
-    agentOutputPath,
-    render: { proposal: { mode: 'issue', branch: 'automation/gdk-x', instructions: '**Goal:** add GDK 2604.2.7850' } },
-  });
-  assert.match(assigned, /assign this issue to complete it/i);
-  assert.match(assigned, /This automation cannot open pull requests in this repository/);
-  assert.match(assigned, /\*\*Goal:\*\* add GDK 2604\.2\.7850/);
+  for (const classification of ['tests_only', 'changes_required', 'needs_review']) {
+    const overrides =
+      classification === 'changes_required'
+        ? { classification, required_changes: [finding()] }
+        : { classification, confidence: classification === 'tests_only' ? 'high' : 'medium' };
+    const body = briefFor(overrides);
+    assert.match(body, /### How to pick this up/, `${classification} must carry the brief`);
+    // The checklist is the handoff: the repository does not allow Actions to
+    // open pull requests, so a human or Copilot has to be able to finish from
+    // the issue alone.
+    assert.match(body, /Assign this issue to GitHub Copilot/, classification);
+    assert.match(body, /You cannot validate this SDK, and you must not claim that you did/, classification);
+    assert.match(body, /re-check this report against current `main`/, classification);
+    assert.match(body, /tools\/run_all_tests\.ps1/, classification);
+    // Advisory, not generated: the brief names the files to edit and never a
+    // before/after value the assignee would be tempted to paste unverified.
+    for (const file of ['cmake/GDKDependencies.cmake', '.github/gdk-versions.json', 'vcpkg-configuration.json', 'vcpkg.json']) {
+      assert.ok(body.includes(`\`${file}\``), `${classification} brief must name ${file}`);
+    }
+    assert.match(body, /actually published in the public vcpkg/, classification);
+    assert.ok(!/```diff/.test(body), 'the brief must not ship a patch to paste');
+  }
 
-  const fellBack = render({
-    agentOutputPath,
-    render: { proposal: { mode: 'issue', instructions: 'task body', fallbackReason: 'Resource not accessible by integration' } },
-  });
-  assert.match(fellBack, /Opening the pull request automatically failed/);
-
-  const failed = render({ agentOutputPath, render: { proposalError: 'registry lookup failed' } });
-  assert.match(failed, /could not be derived: registry lookup failed/);
-
-  const unlinked = render({ agentOutputPath });
-  assert.match(unlinked, /No support change was prepared for this report/);
+  assert.match(briefFor({ classification: 'changes_required', required_changes: [finding()] }), /Work through \*\*Required changes\*\*/);
+  assert.match(briefFor({ classification: 'tests_only' }), /found no source change it could justify/);
+  assert.match(briefFor({ classification: 'needs_review', confidence: 'medium' }), /Resolve the open questions first/);
 });
 
 // ---------------------------------------------------------------------------
@@ -553,42 +557,30 @@ test('renderAssessmentComment carries the support change however it was handed o
 
 test('assertDispatchIsCurrent only accepts the in-flight state it was queued under', () => {
   assert.equal(
-    assess.assertDispatchIsCurrent({ state: { status: 'assessment-dispatched', fingerprint: FINGERPRINT }, fingerprint: FINGERPRINT })
-      .status,
+    assess.assertDispatchIsCurrent({ state: { status: 'assessment-dispatched' }, attempt: '555' }).status,
     'assessment-dispatched',
   );
 
+  // A settled release is a snapshot: nothing may overwrite it except a run the
+  // watcher deliberately re-queued, which moves the state back to dispatched.
   assert.throws(
-    () => assess.assertDispatchIsCurrent({ state: { status: 'tests-only', fingerprint: FINGERPRINT }, fingerprint: FINGERPRINT }),
+    () => assess.assertDispatchIsCurrent({ state: { status: 'tests-only' }, attempt: '555' }),
     /is `tests-only`, not an in-flight assessment/,
   );
   assert.throws(
-    () =>
-      assess.assertDispatchIsCurrent({
-        state: { status: 'assessment-dispatched', fingerprint: FINGERPRINT },
-        fingerprint: '2'.repeat(64),
-      }),
-    /A newer assessment was queued/,
+    () => assess.assertDispatchIsCurrent({ state: { status: 'assessment-failed' }, attempt: '555' }),
+    /is `assessment-failed`, not an in-flight assessment/,
   );
 
-  // Same evidence, but an explicit retry re-queued it under a new watcher run
-  // while this assessor was still working. Publishing now would settle the
-  // retry with a stale report.
+  // An explicit retry re-queued the release under a new watcher run while this
+  // assessor was still working. Publishing now would settle the retry with a
+  // stale report.
   assert.throws(
-    () =>
-      assess.assertDispatchIsCurrent({
-        state: { status: 'assessment-dispatched', fingerprint: FINGERPRINT, attempt: '777' },
-        fingerprint: FINGERPRINT,
-        attempt: '555',
-      }),
+    () => assess.assertDispatchIsCurrent({ state: { status: 'assessment-dispatched', attempt: '777' }, attempt: '555' }),
     /Attempt `777` is now in flight/,
   );
   assert.equal(
-    assess.assertDispatchIsCurrent({
-      state: { status: 'assessment-dispatched', fingerprint: FINGERPRINT, attempt: '555' },
-      fingerprint: FINGERPRINT,
-      attempt: '555',
-    }).status,
+    assess.assertDispatchIsCurrent({ state: { status: 'assessment-dispatched', attempt: '555' }, attempt: '555' }).status,
     'assessment-dispatched',
   );
 });
@@ -596,30 +588,26 @@ test('assertDispatchIsCurrent only accepts the in-flight state it was queued und
 test('the attempt id comes from dispatch inputs, not from the ledger', () => {
   // Derived once by the watcher and carried as an input, so a concurrent retry
   // moving the ledger on cannot change what this run believes it is.
-  assert.equal(watch.assessmentAttemptKey({ runId: 4242, fingerprint: FINGERPRINT }), '4242');
-  assert.equal(watch.assessmentAttemptKey({ runId: 4242, runAttempt: 2, fingerprint: FINGERPRINT }), '4242.2');
+  assert.equal(watch.assessmentAttemptKey({ runId: 4242 }), '4242');
+  assert.equal(watch.assessmentAttemptKey({ runId: 4242, runAttempt: 2 }), '4242.2');
   // Re-running a watcher workflow keeps GITHUB_RUN_ID and only bumps
   // GITHUB_RUN_ATTEMPT, so the run id alone would hand the re-run the first
   // attempt's identity -- and the assessor would discard its report as an
   // already-posted duplicate.
   assert.notEqual(
-    watch.assessmentAttemptKey({ runId: 4242, runAttempt: 1, fingerprint: FINGERPRINT }),
-    watch.assessmentAttemptKey({ runId: 4242, runAttempt: 2, fingerprint: FINGERPRINT }),
+    watch.assessmentAttemptKey({ runId: 4242, runAttempt: 1 }),
+    watch.assessmentAttemptKey({ runId: 4242, runAttempt: 2 }),
   );
   // An assessor re-run keeps the id it was dispatched with: normalising an
   // already-qualified input has to be a no-op.
-  assert.equal(watch.assessmentAttemptKey({ runId: '4242.2', fingerprint: FINGERPRINT }), '4242.2');
-  assert.equal(watch.assessmentAttemptKey({ fingerprint: FINGERPRINT }), `fingerprint-${FINGERPRINT}`);
-  assert.throws(() => watch.assessmentAttemptKey({ runId: 'a -->b', fingerprint: FINGERPRINT }), /Unusable assessment attempt id/);
+  assert.equal(watch.assessmentAttemptKey({ runId: '4242.2' }), '4242.2');
+  assert.throws(() => watch.assessmentAttemptKey({}), /requires the watcher run id/);
+  assert.throws(() => watch.assessmentAttemptKey({ runId: 'a -->b' }), /Unusable assessment attempt id/);
 
   assert.equal(assess.readAssessInputs(assessEnv()).attempt, '555');
   const manual = assess.readAssessInputs(
     assessEnv({
-      GDK_ASSESS_INPUTS: JSON.stringify({
-        release_id: String(RELEASE.id),
-        issue_number: 321,
-        evidence_fingerprint: FINGERPRINT,
-      }),
+      GDK_ASSESS_INPUTS: JSON.stringify({ release_id: String(RELEASE.id), issue_number: 321 }),
     }),
   );
   assert.equal(manual.attempt, null);
@@ -630,7 +618,7 @@ test('the attempt id comes from dispatch inputs, not from the ledger', () => {
   const reports = [reportFor('4242')];
   assert.ok(assess.findAssessmentForAttempt({ reports, attemptKey: '4242' }));
   // A retry runs under a new watcher run id: the earlier report must not
-  // suppress it, or the release is stranded at `assessment-dispatched`.
+  // suppress it, or the retry silently no-ops and the snapshot never refreshes.
   assert.equal(assess.findAssessmentForAttempt({ reports, attemptKey: '9999' }), null);
 });
 
@@ -638,7 +626,7 @@ test('the attempt id comes from dispatch inputs, not from the ledger', () => {
 // Publishing
 // ---------------------------------------------------------------------------
 
-function publishArgs(t, { report = baseReport(), env = {}, comments, contextOverrides, supportUpdate } = {}) {
+function publishArgs(t, { report = baseReport(), env = {}, comments, contextOverrides } = {}) {
   const dir = tempDir(t);
   return {
     github: fakeGithub({ comments: comments || [stateComment('assessment-dispatched')] }),
@@ -648,19 +636,13 @@ function publishArgs(t, { report = baseReport(), env = {}, comments, contextOver
     root: ROOT,
     agentOutputPath: writeAgentOutput(dir, report),
     contextPath: writeContext(dir, contextOverrides),
-    supportUpdate,
   };
 }
 
 test('publishAssessment refuses tests_only when the recorded context was truncated', async (t) => {
   // The tail the agent never saw could have held a breaking change, so the
-  // trusted context record — not the model's self-report — blocks the proposal.
-  const args = publishArgs(t, {
-    contextOverrides: { evidence: { notesTruncated: true, truncated: true } },
-    supportUpdate: async () => {
-      throw new Error('a truncated assessment must never reach the support updater');
-    },
-  });
+  // trusted context record — not the model's self-report — decides the verdict.
+  const args = publishArgs(t, { contextOverrides: { evidence: { notesTruncated: true, truncated: true } } });
   const result = await assess.publishAssessment(args);
 
   assert.equal(result.classification, 'needs_review');
@@ -676,6 +658,8 @@ test('publishAssessment posts the assessment and the resulting watcher state', a
   assert.equal(args.github.state.created.length, 2);
   assert.match(args.github.state.created[0].body, /GDK 2604\.2\.7850 support assessment/);
   assert.equal(args.github.state.created[0].issueNumber, 321);
+  // Advisory only: publishing writes two comments and never a branch or a PR.
+  assert.equal(result.pullRequest, undefined);
 
   const state = watch.latestState(
     [{ user: { login: BOT }, body: args.github.state.created[1].body }],
@@ -683,7 +667,6 @@ test('publishAssessment posts the assessment and the resulting watcher state', a
     BOT,
   );
   assert.equal(state.state.status, 'needs-review');
-  assert.equal(state.state.fingerprint, FINGERPRINT);
   assert.equal(state.state.assessmentUrl, result.url);
 });
 
@@ -710,8 +693,8 @@ test('publishAssessment refuses to publish against context it did not prepare', 
     /Prepared context does not match this assessment run/,
   );
   await assert.rejects(
-    assess.publishAssessment(publishArgs(t, { contextOverrides: { fingerprint: '2'.repeat(64) } })),
-    /built for a different evidence fingerprint/,
+    assess.publishAssessment(publishArgs(t, { contextOverrides: { attempt: '999' } })),
+    /built for a different assessment attempt/,
   );
   await assert.rejects(
     assess.publishAssessment(publishArgs(t, { env: { GITHUB_SHA: 'short' } })),
@@ -756,10 +739,16 @@ test('publishAssessment stages instead of publishing from an untrusted ref', asy
   assert.equal(args.github.state.created.length, 0);
 });
 
-test('publishAssessment refuses to publish a superseded run', async (t) => {
+test('publishAssessment refuses to overwrite a release the watcher already settled', async (t) => {
+  // Reports are snapshots. Once a release is settled, only an explicit retry —
+  // which puts the ledger back in flight — may post another one.
   await assert.rejects(
-    assess.publishAssessment(publishArgs(t, { comments: [stateComment('assessment-dispatched', { fingerprint: '3'.repeat(64) })] })),
-    /A newer assessment was queued/,
+    assess.publishAssessment(publishArgs(t, { comments: [stateComment('tests-only')] })),
+    /is `tests-only`, not an in-flight assessment/,
+  );
+  await assert.rejects(
+    assess.publishAssessment(publishArgs(t, { comments: [stateComment('assessment-failed')] })),
+    /is `assessment-failed`, not an in-flight assessment/,
   );
 });
 
@@ -799,7 +788,6 @@ test('publication requires the attempt id that queued the release', async (t) =>
       release_id: String(RELEASE.id),
       release_tag: RELEASE.tag,
       issue_number: 321,
-      evidence_fingerprint: FINGERPRINT,
     }),
   });
   // Deriving a substitute id from the evidence would never match the
@@ -815,23 +803,6 @@ test('publication requires the attempt id that queued the release', async (t) =>
     publishArgs(t, { env: { ...manual, GDK_ASSESS_MODE: 'staged' } }),
   );
   assert.deepEqual([staged.posted, staged.staged], [false, true]);
-});
-
-test('a retry queued during support preparation stops the run before it posts', async (t) => {
-  // The registry lookup is the longest await in the publish path. The ledger
-  // snapshot taken before it is stale by the time the report would go out.
-  const ledger = [stateComment('assessment-dispatched', { runId: 555, attempt: '555' })];
-  const args = publishArgs(t, {
-    report: baseReport({ classification: 'tests_only' }),
-    comments: ledger,
-    supportUpdate: async () => {
-      ledger.length = 0;
-      ledger.push(stateComment('assessment-dispatched', { runId: 777, attempt: '777' }));
-      return { url: 'https://example.test/pull/5', branch: 'automation/gdk-x', mode: 'task' };
-    },
-  });
-  await assert.rejects(assess.publishAssessment(args), /Attempt `777` is now in flight/);
-  assert.equal(args.github.state.created.length, 0);
 });
 
 test('re-running a completed assessor run finds its own report instead of republishing', async (t) => {
@@ -868,74 +839,25 @@ test('re-running a completed assessor run finds its own report instead of republ
   assert.equal(rerun.github.state.created.length, 0);
 });
 
-test('publishAssessment opens a draft pull request only for a surviving tests_only report', async (t) => {
-  const calls = [];
-  const supportUpdate = async (params) => {
-    calls.push(params);
-    return { url: 'https://example.test/pull/7' };
-  };
-
-  const testsOnly = publishArgs(t, { supportUpdate });
+test('a downgraded report is published under the status its verdict earned', async (t) => {
+  // The only consequence of a verdict now is the ledger status and the brief
+  // the assignee reads. Nothing is generated from it, so a downgrade just has
+  // to be recorded honestly.
+  const testsOnly = publishArgs(t);
   const result = await assess.publishAssessment(testsOnly);
   assert.equal(result.classification, 'tests_only');
-  assert.equal(result.pullRequest, 'https://example.test/pull/7');
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].release, RELEASE);
-  assert.equal(calls[0].issueNumber, 321);
-  assert.match(testsOnly.github.state.created[0].body, /A draft pull request is open/);
-  assert.match(testsOnly.github.state.created[1].body, /"pullRequest": "https:\/\/example\.test\/pull\/7"/);
+  assert.match(testsOnly.github.state.created[1].body, /"status": "tests-only"/);
 
-  calls.length = 0;
-  const downgraded = publishArgs(t, { report: baseReport({ confidence: 'low' }), supportUpdate });
+  const downgraded = publishArgs(t, { report: baseReport({ confidence: 'low' }) });
   const downgradedResult = await assess.publishAssessment(downgraded);
   assert.equal(downgradedResult.classification, 'needs_review');
-  assert.equal(downgradedResult.pullRequest, null);
-  assert.equal(calls.length, 0, 'a downgraded report must never touch the support lists');
+  assert.match(downgraded.github.state.created[1].body, /"status": "needs-review"/);
 
-  calls.length = 0;
   const changes = publishArgs(t, {
     report: baseReport({ classification: 'changes_required', required_changes: [finding()] }),
-    supportUpdate,
   });
   await assess.publishAssessment(changes);
-  assert.equal(calls.length, 0);
-});
-
-test('publishAssessment still posts the assessment when the support change fails', async (t) => {
-  const args = publishArgs(t, {
-    supportUpdate: async () => {
-      throw new Error('branch protection rejected the push');
-    },
-  });
-  const result = await assess.publishAssessment(args);
-
-  assert.equal(result.posted, true);
-  assert.equal(result.pullRequest, null);
-  assert.equal(result.classification, 'tests_only');
-  assert.ok(args.core.warnings.some((message) => /could not be prepared: branch protection rejected the push/.test(message)));
-  assert.match(args.github.state.created[0].body, /could not be derived: branch protection rejected the push/);
-  assert.match(args.github.state.created[1].body, /support change skipped: branch protection rejected the push/);
-  assert.match(args.github.state.created[1].body, /"status": "tests-only"/);
-});
-
-test('publishAssessment posts the assignable task when no pull request was opened', async (t) => {
-  const args = publishArgs(t, {
-    supportUpdate: async () => ({
-      created: false,
-      mode: 'issue',
-      branch: 'automation/gdk-2604.2.7850-4242',
-      instructions: '**Goal:** add Microsoft GDK `2604.2.7850`',
-    }),
-  });
-  const result = await assess.publishAssessment(args);
-
-  assert.equal(result.posted, true);
-  assert.equal(result.pullRequest, null, 'issue mode never reports a pull request url');
-  assert.equal(result.proposalMode, 'issue');
-  assert.match(args.github.state.created[0].body, /assign this issue to complete it/i);
-  assert.match(args.github.state.created[0].body, /\*\*Goal:\*\* add Microsoft GDK `2604\.2\.7850`/);
-  assert.match(args.github.state.created[1].body, /"supportBranch": "automation\/gdk-2604\.2\.7850-4242"/);
-  assert.match(args.github.state.created[1].body, /"pullRequest": null/);
+  assert.match(changes.github.state.created[1].body, /"status": "changes-required"/);
 });
 
 test('STATUS_FOR_CLASSIFICATION only produces statuses the watcher ledger understands', () => {

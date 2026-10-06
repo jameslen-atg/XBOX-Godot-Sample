@@ -493,7 +493,7 @@ const RULES = [
     name: 'gdk release watch helpers / workflows',
     kind: 'specific',
     test: (p) =>
-      /^tools\/ci\/gdk_(release|support)_[^/]*$/.test(p) ||
+      /^tools\/ci\/gdk_release_[^/]*$/.test(p) ||
       /^tools\/ci\/tests\/gdk_[^/]*$/.test(p) ||
       /^\.github\/workflows\/gdk-release-[^/]*$/.test(p),
     apply: () => {},

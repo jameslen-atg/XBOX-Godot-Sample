@@ -25,16 +25,10 @@ function makeSupportFixture({
     { version: '2510.1.6224', edition: '251001', release: 'October 2025 Update 1' },
   ],
   baseline = '0'.repeat(40),
-  sources = {},
 } = {}) {
   const root = tempDir();
   fs.mkdirSync(path.join(root, 'cmake'), { recursive: true });
   fs.mkdirSync(path.join(root, '.github'), { recursive: true });
-  for (const [relative, text] of Object.entries(sources)) {
-    const file = path.join(root, relative);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, text);
-  }
   fs.writeFileSync(
     path.join(root, 'cmake', 'GDKDependencies.cmake'),
     `# fixture\nset(GDK_SUPPORTED_VERSIONS "${editions.join(';')}"\n    CACHE STRING "Supported editions")\n`,
@@ -384,125 +378,82 @@ test('findSupportBaselineRelease prefers the newest supported release in the sam
 });
 
 // ---------------------------------------------------------------------------
-// Evidence fingerprint
-// ---------------------------------------------------------------------------
-
-test('computeEvidenceFingerprint tracks evidence and ignores cosmetic metadata', () => {
-  const state = watch.readSupportState(makeSupportFixture());
-  const release = eligible(makeRelease());
-  const base = watch.computeEvidenceFingerprint({ release, body: 'notes', baselineRelease: null, state });
-
-  assert.equal(watch.computeEvidenceFingerprint({ release, body: 'notes', baselineRelease: null, state }), base);
-  assert.notEqual(watch.computeEvidenceFingerprint({ release, body: 'notes v2', baselineRelease: null, state }), base);
-
-  const renamed = { ...release, name: 'Different title', publishedAt: '2030-01-01T00:00:00Z' };
-  assert.equal(watch.computeEvidenceFingerprint({ release: renamed, body: 'notes', baselineRelease: null, state }), base);
-
-  const moved = watch.readSupportState(makeSupportFixture({ editions: ['251001'] }));
-  assert.notEqual(watch.computeEvidenceFingerprint({ release, body: 'notes', baselineRelease: null, state: moved }), base);
-});
-
-test('computeEvidenceFingerprint tracks the baseline notes the delta is computed against', () => {
-  // `releaseNoteDelta` subtracts the baseline body from the candidate body, so
-  // an upstream edit to the baseline alone still changes the agent's evidence.
-  const state = watch.readSupportState(makeSupportFixture());
-  const release = eligible(makeRelease());
-  const baselineRelease = { id: 11, tag: 'April-2026-Update-1-v2604.1.7839' };
-  const withBaseline = (baselineBody) =>
-    watch.computeEvidenceFingerprint({ release, body: 'notes', baselineRelease, baselineBody, state });
-
-  assert.equal(withBaseline('baseline notes'), withBaseline('baseline notes'));
-  assert.notEqual(withBaseline('baseline notes v2'), withBaseline('baseline notes'));
-  assert.notEqual(
-    withBaseline('baseline notes'),
-    watch.computeEvidenceFingerprint({ release, body: 'notes', baselineRelease: null, state }),
-  );
-});
-
-test('computeReviewedSourceDigest covers reviewed source and ignores build output', () => {
-  const sources = {
-    'addons/godot_gdk/src/gdk.cpp': 'int main() { return 0; }\n',
-    'cmake/GDKPackaging.cmake': '# packaging\n',
-    'tools/run_all_tests.ps1': 'Write-Host hi\n',
-  };
-  const root = makeSupportFixture({ sources });
-  const base = watch.computeReviewedSourceDigest(root);
-
-  // Stable across calls, and unaffected by gitignored build and restore output
-  // that only exists on a machine where someone has built the tree.
-  assert.equal(watch.computeReviewedSourceDigest(root), base);
-  fs.mkdirSync(path.join(root, 'addons', 'godot_gdk', 'bin'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'addons', 'godot_gdk', 'bin', 'godot_gdk.dll'), 'binary');
-  fs.mkdirSync(path.join(root, 'tools', 'node_modules', 'left-pad'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'tools', 'node_modules', 'left-pad', 'index.js'), 'module.exports = 1;');
-  assert.equal(watch.computeReviewedSourceDigest(root), base);
-
-  // An area that does not exist in this checkout contributes nothing rather
-  // than failing discovery.
-  assert.equal(watch.computeReviewedSourceDigest(makeSupportFixture({ sources })), base);
-
-  fs.writeFileSync(path.join(root, 'addons', 'godot_gdk', 'src', 'gdk.cpp'), 'int main() { return 1; }\n');
-  assert.notEqual(watch.computeReviewedSourceDigest(root), base);
-});
-
-test('computeEvidenceFingerprint tracks the repository source the assessment reviewed', () => {
-  // A completed assessment describes this repository at a point in time. If a
-  // source-only change left the fingerprint alone, `assessmentDecision` would
-  // keep serving a report written against an older snapshot.
-  const release = eligible(makeRelease());
-  const fingerprintFor = (sources) =>
-    watch.computeEvidenceFingerprint({
-      release,
-      body: 'notes',
-      baselineRelease: null,
-      state: watch.readSupportState(makeSupportFixture({ sources })),
-    });
-
-  const base = fingerprintFor({ 'addons/godot_gdk/src/gdk.cpp': 'void a();\n' });
-  assert.equal(fingerprintFor({ 'addons/godot_gdk/src/gdk.cpp': 'void a();\n' }), base);
-  assert.notEqual(fingerprintFor({ 'addons/godot_gdk/src/gdk.cpp': 'void b();\n' }), base);
-  assert.notEqual(fingerprintFor({ 'addons/godot_playfab/src/playfab.cpp': 'void a();\n' }), base);
-});
-
-// ---------------------------------------------------------------------------
 // Assessment decisions
 // ---------------------------------------------------------------------------
 
-test('assessmentDecision queues new work and skips settled or in-flight work', () => {
+test('assessmentDecision queues the first assessment and nothing else', () => {
   const issue = { number: 1, state: 'open' };
-  assert.deepEqual(watch.assessmentDecision({ record: null, fingerprint: 'a' }), {
+  assert.deepEqual(watch.assessmentDecision({ record: null }), {
     dispatch: true,
     reason: 'no tracking issue yet',
-    priority: 0,
   });
-  assert.equal(watch.assessmentDecision({ record: { issue, state: null }, fingerprint: 'a' }).priority, 0);
+  assert.equal(watch.assessmentDecision({ record: { issue, state: null } }).dispatch, true);
   assert.equal(
-    watch.assessmentDecision({ record: { issue: { number: 1, state: 'closed' }, state: null }, fingerprint: 'a' }).dispatch,
+    watch.assessmentDecision({ record: { issue: { number: 1, state: 'closed' }, state: null } }).dispatch,
     false,
   );
   assert.equal(
-    watch.assessmentDecision({ record: { issue, state: { status: 'assessment-dispatched', runId: 7 } }, fingerprint: 'a' }).dispatch,
+    watch.assessmentDecision({ record: { issue, state: { status: 'assessment-dispatched', runId: 7 } } }).dispatch,
     false,
   );
-  assert.equal(
-    watch.assessmentDecision({ record: { issue, state: { status: 'tests-only', fingerprint: 'a' } }, fingerprint: 'a' }).dispatch,
-    false,
-  );
+  assert.equal(watch.assessmentDecision({ record: { issue, state: { status: 'tests-only' } } }).dispatch, false);
 });
 
-test('assessmentDecision orders failures behind never-attempted and changed work', () => {
+test('a settled report is a snapshot: nothing automatically reassesses it', () => {
+  // The whole point of the simplification. A finished assessment describes the
+  // commit it analyzed; neither a source change here nor an upstream edit to
+  // the release notes may silently spend another paid assessor run.
   const issue = { number: 1, state: 'open' };
-  const changed = watch.assessmentDecision({ record: { issue, state: { status: 'needs-review', fingerprint: 'old' } }, fingerprint: 'new' });
-  const failed = watch.assessmentDecision({ record: { issue, state: { status: 'assessment-failed', fingerprint: 'a' } }, fingerprint: 'a' });
-  assert.equal(changed.priority, 1);
-  assert.equal(failed.priority, 2);
-  assert.ok(failed.priority > changed.priority, 'a permanently failing item must not starve newer work');
+  for (const status of ['tests-only', 'changes-required', 'needs-review']) {
+    const decision = watch.assessmentDecision({ record: { issue, state: { status } } });
+    assert.equal(decision.dispatch, false, `${status} must not be reassessed automatically`);
+  }
+});
+
+test('a failed assessment is surfaced rather than retried automatically', () => {
+  const issue = { number: 1, state: 'open' };
+  const failed = watch.assessmentDecision({ record: { issue, state: { status: 'assessment-failed' } } });
+  assert.equal(failed.dispatch, false);
+  assert.match(failed.reason, /retry/i, 'the reason must tell a maintainer how to recover');
+});
+
+test('a dead in-flight attempt is flagged stalled without being redispatched', () => {
+  const issue = { number: 1, state: 'open' };
+  const decision = watch.assessmentDecision({
+    record: {
+      issue,
+      state: { status: 'assessment-dispatched', runId: 7 },
+      staleAttempt: 'a timed-out attempt',
+    },
+  });
+  assert.equal(decision.dispatch, false, 'detecting a dead run must not start a new paid one');
+  assert.equal(decision.stalled, 'a timed-out attempt');
+});
+
+test('staleAttemptStatus only ages out attempts that are really in flight', () => {
+  const now = Date.now();
+  assert.equal(watch.staleAttemptStatus({ status: 'tests-only' }, now), null);
+  assert.equal(
+    watch.staleAttemptStatus({ status: 'assessment-dispatched', at: new Date(now - 1000).toISOString() }, now),
+    null,
+  );
+  assert.match(
+    watch.staleAttemptStatus(
+      { status: 'assessment-dispatched', at: new Date(now - watch.LIMITS.assessmentTimeoutMs - 1000).toISOString() },
+      now,
+    ),
+    /timed-out/,
+  );
+  assert.match(watch.staleAttemptStatus({ status: 'assessment-dispatched' }, now), /no recorded start time/);
 });
 
 test('assessmentDecision honours an explicit retry over a settled state', () => {
-  const record = { issue: { number: 1, state: 'open' }, state: { status: 'changes-required', fingerprint: 'a' } };
-  assert.equal(watch.assessmentDecision({ record, fingerprint: 'a' }).dispatch, false);
-  assert.equal(watch.assessmentDecision({ record, fingerprint: 'a', retry: true }).dispatch, true);
+  const record = { issue: { number: 1, state: 'open' }, state: { status: 'changes-required' } };
+  assert.equal(watch.assessmentDecision({ record }).dispatch, false);
+  assert.equal(watch.assessmentDecision({ record, retry: true }).dispatch, true);
+  // Recovery from a failure uses the same single lever.
+  const failed = { issue: { number: 1, state: 'open' }, state: { status: 'assessment-failed' } };
+  assert.equal(watch.assessmentDecision({ record: failed, retry: true }).dispatch, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -510,7 +461,7 @@ test('assessmentDecision honours an explicit retry over a settled state', () => 
 // ---------------------------------------------------------------------------
 
 test('state comments round-trip through render, parse and latestState', () => {
-  const body = watch.renderStateComment({ releaseId: 7, state: { status: 'tests-only', fingerprint: 'abc', note: 'all good' } });
+  const body = watch.renderStateComment({ releaseId: 7, state: { status: 'tests-only', note: 'all good' } });
   assert.ok(body.startsWith(watch.stateMarkerPrefix(7)));
   assert.match(body, /all good/);
   const parsed = watch.parseStateComment(body);
@@ -519,7 +470,7 @@ test('state comments round-trip through render, parse and latestState', () => {
 
   const comments = [
     { body: 'unrelated', user: { login: 'human' } },
-    { body: watch.renderStateComment({ releaseId: 7, state: { status: 'assessment-failed', fingerprint: 'a' } }), user: { login: BOT } },
+    { body: watch.renderStateComment({ releaseId: 7, state: { status: 'assessment-failed' } }), user: { login: BOT } },
     { body, user: { login: BOT } },
   ];
   assert.equal(watch.latestState(comments, 7, BOT).state.status, 'tests-only');
@@ -637,12 +588,10 @@ test('runWatch opens one tracking issue per release but dispatches only one asse
   assert.equal(dispatch.workflow_id, watch.ASSESS_WORKFLOW);
   assert.equal(dispatch.ref, 'main');
   assert.equal(dispatch.inputs.release_tag, 'April-2026-Update-1-v2604.1.7839', 'the oldest unsupported release goes first');
-  assert.match(dispatch.inputs.evidence_fingerprint, /^[0-9a-f]{64}$/);
   assert.equal(dispatch.inputs.issue_number, String(github.state.createdIssues[0].number));
 
   const stateComment = github.state.createdComments.find((entry) => entry.body.includes('assessment-dispatched'));
   assert.ok(stateComment, 'the dispatch is recorded in the durable ledger before it is sent');
-  assert.equal(watch.parseStateComment(stateComment.body).fingerprint, dispatch.inputs.evidence_fingerprint);
   // The attempt id travels as a dispatch input so the assessor never has to
   // re-derive it from a ledger a concurrent retry may already have moved on.
   assert.equal(dispatch.inputs.attempt, '555.1');
@@ -772,7 +721,7 @@ test('runWatch reuses an existing tracking issue and respects its recorded state
           user: { login: BOT },
           body: watch.renderStateComment({
             releaseId: 2,
-            state: { status: 'assessment-dispatched', fingerprint: 'whatever', runId: '1', at: new Date().toISOString() },
+            state: { status: 'assessment-dispatched', runId: '1', at: new Date().toISOString() },
           }),
         },
       ],
@@ -792,11 +741,14 @@ test('runWatch reuses an existing tracking issue and respects its recorded state
   assert.ok(github.state.dispatches.every((entry) => entry.inputs.release_id !== '2'));
 });
 
-test('runWatch re-queues an attempt that died without posting an assessment', async () => {
+test('runWatch closes out an attempt that died without posting, and stops there', async () => {
   const release = eligible(makeRelease({ id: 2 }));
   const issue = trackingIssue({ number: 100, releaseId: 2, release });
   // Nothing ever writes `assessment-failed` on the assessor's behalf, so an
   // assessor that crashed would otherwise leave this release in flight forever.
+  // The watcher closes the ledger entry out and says how to recover, but does
+  // not start another paid attempt: a run that died on this release would keep
+  // dying on it, unattended, every week.
   const stale = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const github = fakeGithub({
     releases: watchReleases(),
@@ -808,7 +760,54 @@ test('runWatch re-queues an attempt that died without posting an assessment', as
           user: { login: BOT },
           body: watch.renderStateComment({
             releaseId: 2,
-            state: { status: 'assessment-dispatched', fingerprint: 'whatever', runId: '1', at: stale },
+            state: { status: 'assessment-dispatched', runId: '1', at: stale },
+          }),
+        },
+      ],
+    },
+  });
+  const core = fakeCore();
+  const result = await watch.runWatch({
+    github,
+    context: CONTEXT,
+    core,
+    env: { ...TRUSTED_ENV, GDK_WATCH_INPUTS: '{"drain_backlog":true}' },
+    root: makeSupportFixture(),
+  });
+
+  assert.equal(result.decisions.get('2').dispatch, false);
+  assert.match(result.decisions.get('2').reason, /timed-out attempt/);
+  assert.equal(result.stalled.length, 1);
+  assert.equal(result.stalled[0].release.id, 2);
+
+  const bodies = github.state.createdComments.filter((entry) => entry.issue === 100).map((entry) => entry.body);
+  assert.ok(bodies.some((body) => /assessment-failed/.test(body)), 'the dead attempt is closed out on the issue');
+  assert.ok(
+    bodies.some((body) => /retry: true/.test(body)),
+    'the state comment tells a maintainer how to recover',
+  );
+  assert.ok(!bodies.some((body) => /assessment-dispatched/.test(body)), 'no replacement attempt is queued');
+  assert.ok(github.state.dispatches.every((entry) => entry.inputs.release_id !== '2'));
+  assert.ok(
+    core.warnings.some((message) => /retry: true/.test(message)),
+    'the run itself reports the stalled release',
+  );
+});
+
+test('an explicit retry recovers a release the watcher closed out as failed', async () => {
+  const release = eligible(makeRelease({ id: 2 }));
+  const issue = trackingIssue({ number: 100, releaseId: 2, release });
+  const github = fakeGithub({
+    releases: watchReleases(),
+    issues: [issue],
+    comments: {
+      100: [
+        {
+          id: 1,
+          user: { login: BOT },
+          body: watch.renderStateComment({
+            releaseId: 2,
+            state: { status: 'assessment-failed', runId: '1', at: new Date().toISOString() },
           }),
         },
       ],
@@ -818,16 +817,19 @@ test('runWatch re-queues an attempt that died without posting an assessment', as
     github,
     context: CONTEXT,
     core: fakeCore(),
-    env: { ...TRUSTED_ENV, GDK_WATCH_INPUTS: '{"drain_backlog":true}' },
+    env: {
+      ...TRUSTED_ENV,
+      GDK_WATCH_INPUTS: JSON.stringify({ release_tag: release.tag, retry: true }),
+    },
     root: makeSupportFixture(),
   });
 
   assert.equal(result.decisions.get('2').dispatch, true);
-  assert.match(result.decisions.get('2').reason, /timed-out attempt/);
-  const bodies = github.state.createdComments.filter((entry) => entry.issue === 100).map((entry) => entry.body);
-  assert.ok(bodies.some((body) => /assessment-failed/.test(body)), 'the dead attempt is closed out before re-queueing');
-  assert.ok(bodies.some((body) => /assessment-dispatched/.test(body)));
-  assert.ok(github.state.dispatches.some((entry) => entry.inputs.release_id === '2'));
+  assert.match(result.decisions.get('2').reason, /retry/i);
+  assert.deepEqual(
+    github.state.dispatches.map((entry) => entry.inputs.release_id),
+    ['2'],
+  );
 });
 
 test('a failed dispatch is recorded instead of leaving the ledger in flight', async () => {

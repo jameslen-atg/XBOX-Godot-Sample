@@ -7,11 +7,16 @@
 // the agentic assessor (.github/workflows/gdk-release-assess.md) for one queued
 // release at a time.
 //
+// A release is assessed automatically exactly once. The resulting report is a
+// snapshot of the repository at the commit it was produced from, not a
+// maintained compatibility claim, so nothing here re-queues a release because
+// main moved or upstream edited its notes. A maintainer who wants a fresh
+// answer asks for one with `release_tag` + `retry`.
+//
 // Everything that decides eligibility, identity, ordering, or state lives here
 // so it can be unit tested (tools/ci/tests/gdk_release_watch.test.cjs). The
 // model never participates in discovery.
 
-const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -40,32 +45,11 @@ const LIMITS = Object.freeze({
   maxNotesChars: 40000,
   maxQueuedPerRun: 1,
   // An assessment that has not reported back well inside this window is dead:
-  // the assessor finishes in minutes, and the watcher polls weekly.
+  // the assessor finishes in minutes, and the watcher polls weekly. Detecting
+  // that only closes the ledger entry out so the failure is visible; it never
+  // starts another model run.
   assessmentTimeoutMs: 6 * 60 * 60 * 1000,
-  // A guard, not a budget: the reviewed tree is a few hundred text files. A
-  // count far above that means an ignore rule stopped matching, and hashing a
-  // build output tree would be both slow and permanently unstable.
-  maxReviewedSourceFiles: 5000,
 });
-
-// The areas the agent is told to review, from the "Review at least these areas"
-// list in .github/workflows/gdk-release-assess.md. Keep the two in sync: this
-// is what makes a source-only change invalidate a completed assessment.
-const REVIEWED_SOURCE_PATHS = Object.freeze([
-  'addons/godot_gdk',
-  'addons/godot_gameinput',
-  'addons/godot_playfab',
-  'addons/godot_gdk_editortools',
-  'cmake',
-  'tools',
-]);
-
-// Build and restore outputs. These are gitignored, so they exist only on a
-// developer machine, and hashing them would make the fingerprint depend on
-// whether someone had built the tree.
-const REVIEWED_SOURCE_IGNORED_DIRS = Object.freeze(
-  new Set(['.git', '.godot', '.vs', 'bin', 'build', 'node_modules', 'third_party', 'vcpkg_installed']),
-);
 
 const MONTHS = Object.freeze({
   january: 1,
@@ -255,47 +239,6 @@ function readJsonFile(root, relative) {
   }
 }
 
-// A content digest over the source the assessor is actually asked to review.
-// Without it the evidence fingerprint covers only the upstream notes and the
-// support lists, so an addon or packaging change made against an already
-// assessed release leaves the fingerprint untouched and `assessmentDecision`
-// keeps serving a report that describes an older snapshot of this repository.
-function computeReviewedSourceDigest(root) {
-  const files = [];
-  const visit = (absolute, relative) => {
-    let stats;
-    try {
-      stats = fs.lstatSync(absolute);
-    } catch (error) {
-      // A reviewed area that does not exist in this checkout contributes
-      // nothing; it must not break discovery.
-      if (error.code === 'ENOENT') return;
-      throw new WatchError(`${relative} could not be inspected: ${error.message}`);
-    }
-    if (stats.isFile()) {
-      files.push(relative);
-      return;
-    }
-    // Symlinks are skipped rather than followed: they cannot be hashed
-    // deterministically and a cycle would hang the watcher.
-    if (!stats.isDirectory()) return;
-    for (const entry of fs.readdirSync(absolute)) {
-      if (REVIEWED_SOURCE_IGNORED_DIRS.has(entry)) continue;
-      visit(path.join(absolute, entry), `${relative}/${entry}`);
-    }
-  };
-  for (const area of REVIEWED_SOURCE_PATHS) visit(path.join(root, area), area);
-  if (files.length > LIMITS.maxReviewedSourceFiles) {
-    throw new WatchError(
-      `The reviewed source tree has ${files.length} files, above the ${LIMITS.maxReviewedSourceFiles} limit; ` +
-        'an ignore rule in REVIEWED_SOURCE_IGNORED_DIRS has probably stopped matching.',
-    );
-  }
-  files.sort();
-  const lines = files.map((relative) => `${relative}:${sha256(fs.readFileSync(path.join(root, relative)))}`);
-  return sha256(lines.join('\n'));
-}
-
 // The two support lists are independent and are not interchangeable: the CMake
 // allowlist governs an SDK installed on disk, the hosted matrix governs vcpkg
 // `ms-gdk` port versions that a GitHub-hosted runner can restore.
@@ -314,7 +257,6 @@ function readSupportState(root) {
     installedEditions,
     hosted,
     baseline,
-    reviewedSource: computeReviewedSourceDigest(root),
     minimumEdition: String(MINIMUM_EDITION),
   };
 }
@@ -373,35 +315,6 @@ function findSupportBaselineRelease(candidate, supportedReleases) {
   return pool[pool.length - 1];
 }
 
-function sha256(value) {
-  return crypto.createHash('sha256').update(value).digest('hex');
-}
-
-// One fingerprint over everything an assessment actually depends on. Cosmetic
-// upstream metadata edits must not burn another model run.
-function computeEvidenceFingerprint({ release, body, baselineRelease, baselineBody, state }) {
-  const canonical = JSON.stringify({
-    release: { id: release.id, tag: release.tag, version: release.version, asset: release.asset },
-    body: sha256(String(body || '')),
-    // The baseline body is evidence too: `releaseNoteDelta` subtracts it from
-    // the candidate notes, so editing it alone changes what the agent reads.
-    baseline: baselineRelease
-      ? { id: baselineRelease.id, tag: baselineRelease.tag, body: sha256(String(baselineBody || '')) }
-      : null,
-    support: {
-      installed: [...state.installedEditions].sort(),
-      hosted: state.hosted.supported.map((entry) => entry.version).sort(),
-      hostedDefault: state.hosted.default,
-      baseline: state.baseline,
-    },
-    // The reviewed source is evidence as much as the notes are: a completed
-    // assessment describes this repository at a point in time, so changing the
-    // addons, CMake, or packaging tooling it reviewed makes it stale.
-    reviewedSource: state.reviewedSource || null,
-  });
-  return sha256(canonical);
-}
-
 function markerPrefix(releaseId) {
   return `<!-- ${MARKER_NAME} id=${releaseId} `;
 }
@@ -445,14 +358,20 @@ function renderTrackingIssueBody({ release, baselineRelease, state, runUrl }) {
     '',
     '### What happens next',
     '',
-    '1. The watcher dispatches the read-only assessor for this release.',
+    '1. The watcher dispatches the read-only assessor for this release, once.',
     '2. The assessor posts a report comment classifying the release as',
-    '   `changes_required`, `tests_only`, or `needs_review`.',
-    '3. A `tests_only` result also gets the exact support-list edits written out as a complete,',
-    '   self-contained task **in that same report comment**. Assign this issue to Copilot (or pick it',
-    '   up yourself) to turn that task into a draft pull request — the comment is the full brief.',
-    '4. Either way a human builds and tests against the real SDK before support is merged. No part of',
+    '   `changes_required`, `tests_only`, or `needs_review`, together with the checklist for',
+    '   turning that report into a change.',
+    '3. Assign this issue to Copilot (or pick it up yourself) to do that work. The report is a',
+    '   **snapshot** of the commit it names, not a standing claim: re-check current `main`,',
+    '   derive the version-list changes against the repository as it is then, and open a draft',
+    '   pull request.',
+    '4. A human builds and tests against the real SDK before support is merged. No part of',
     '   this automation can validate an SDK, so nothing here is approved support.',
+    '',
+    'The assessment is not repeated automatically — not when this repository changes, and not',
+    'when upstream edits its notes. To get a fresh one, run the **GDK Release Watch** workflow',
+    `with \`release_tag: ${release.tag}\` and \`retry: true\`.`,
     '',
     'Closing this issue tells the watcher the release was handled; it is never reopened automatically.',
     '',
@@ -629,35 +548,29 @@ async function ensureTrackingIssue({ github, core, owner, repo, release, baselin
   return { issue: data, created: true };
 }
 
-// A release is ready for another model run when it has never been assessed, when
-// evidence changed since the last assessment, or when a human explicitly asked
-// for a retry. A permanently failing item must not starve untouched releases, so
-// failures are ordered behind never-attempted work rather than blocking it.
-function assessmentDecision({ record, fingerprint, retry }) {
-  if (!record) return { dispatch: true, reason: 'no tracking issue yet', priority: 0 };
+// A release is assessed automatically once: when it has never been assessed, or
+// when a human explicitly asks for another look. A completed report is a
+// snapshot of the commit it names, so a later change to this repository or to
+// the upstream notes does not silently buy another model run — the maintainer
+// decides whether a fresh answer is worth one.
+function assessmentDecision({ record, retry }) {
+  if (!record) return { dispatch: true, reason: 'no tracking issue yet' };
   if (record.issue.state === 'closed') return { dispatch: false, reason: 'tracking issue is closed' };
   const state = record.state;
-  if (!state) return { dispatch: true, reason: 'tracking issue has no recorded state', priority: 0 };
-  if (retry) return { dispatch: true, reason: 'explicit retry requested', priority: 0 };
+  if (!state) return { dispatch: true, reason: 'tracking issue has no recorded state' };
+  if (retry) return { dispatch: true, reason: 'explicit retry requested' };
   if (state.status === 'assessment-dispatched') {
     // An attempt whose run already finished without posting is dead, not in
-    // flight. Without this the release stays queued forever, because nothing
-    // else writes `assessment-failed`.
+    // flight. Say so on the issue so the failure is visible, but do not start
+    // another assessment: a run that died because the agent crashed on this
+    // release would otherwise fail the same way every week, unattended.
     if (record.staleAttempt) {
-      return {
-        dispatch: true,
-        reason: `the previous attempt ended as ${record.staleAttempt} without posting an assessment`,
-        priority: 2,
-        reconcile: record.staleAttempt,
-      };
+      return { dispatch: false, reason: `the previous attempt ended as ${record.staleAttempt}`, stalled: record.staleAttempt };
     }
     return { dispatch: false, reason: `an assessment is already in flight (run ${state.runId || 'unknown'})` };
   }
   if (state.status === 'assessment-failed') {
-    return { dispatch: true, reason: 'previous assessment failed', priority: 2 };
-  }
-  if (state.fingerprint && state.fingerprint !== fingerprint) {
-    return { dispatch: true, reason: 'upstream or support evidence changed since the last assessment', priority: 1 };
+    return { dispatch: false, reason: 'the previous assessment failed; dispatch a retry to try again' };
   }
   return { dispatch: false, reason: `already assessed as ${state.status}` };
 }
@@ -665,7 +578,7 @@ function assessmentDecision({ record, fingerprint, retry }) {
 // An `assessment-dispatched` record is only in flight while its attempt could
 // still be running. Past that window the attempt failed somewhere the watcher
 // cannot observe (dispatch rejected, agent crashed, detection blocked the safe
-// output), and the release must become eligible again.
+// output), and the ledger has to stop claiming an assessment is coming.
 function staleAttemptStatus(state, now) {
   if (!state || state.status !== 'assessment-dispatched') return null;
   const startedAt = Date.parse(state.at || '');
@@ -692,24 +605,26 @@ async function loadRecords({ github, owner, repo, botLogin, backlog, now = Date.
   return records;
 }
 
-// Identifies one dispatch attempt. A retry re-queues the same evidence, so the
-// fingerprint cannot tell two attempts apart; the watcher run that queued the
-// work can. The run attempt is part of the key because re-running a watcher
-// workflow preserves GITHUB_RUN_ID and only increments GITHUB_RUN_ATTEMPT, so
-// the run id alone would hand a re-run the previous attempt's identity. This is
-// computed once, at dispatch, and then travels as an input so that neither side
-// has to re-derive it from a ledger another run may have moved on -- an
-// assessor re-run keeps the id it was dispatched with. The character class
-// keeps it safe to embed in an HTML marker.
-function assessmentAttemptKey({ runId, runAttempt, fingerprint }) {
+// Identifies one dispatch attempt. A retry re-assesses the same release, so
+// nothing about the evidence tells two attempts apart; the watcher run that
+// queued the work does. The run attempt is part of the key because re-running a
+// watcher workflow preserves GITHUB_RUN_ID and only increments
+// GITHUB_RUN_ATTEMPT, so the run id alone would hand a re-run the previous
+// attempt's identity. This is computed once, at dispatch, and then travels as
+// an input so that neither side has to re-derive it from a ledger another run
+// may have moved on -- an assessor re-run keeps the id it was dispatched with.
+const ATTEMPT_PATTERN = /^[A-Za-z0-9._-]{1,96}$/;
+
+function assessmentAttemptKey({ runId, runAttempt }) {
   const run = String(runId || '').trim();
   const attempt = String(runAttempt || '').trim();
-  const key = run ? (attempt ? `${run}.${attempt}` : run) : `fingerprint-${fingerprint}`;
-  if (!/^[A-Za-z0-9._-]{1,96}$/.test(key)) throw new WatchError(`Unusable assessment attempt id: ${key}`);
+  if (!run) throw new WatchError('An assessment attempt id requires the watcher run id (GITHUB_RUN_ID).');
+  const key = attempt ? `${run}.${attempt}` : run;
+  if (!ATTEMPT_PATTERN.test(key)) throw new WatchError(`Unusable assessment attempt id: ${key}`);
   return key;
 }
 
-async function dispatchAssessment({ github, core, owner, repo, release, issue, fingerprint, attempt, env }) {
+async function dispatchAssessment({ github, core, owner, repo, release, issue, attempt, env }) {
   const ref = (env.GITHUB_REF_NAME || 'main').trim();
   await github.rest.actions.createWorkflowDispatch({
     owner,
@@ -720,7 +635,6 @@ async function dispatchAssessment({ github, core, owner, repo, release, issue, f
       release_id: String(release.id),
       release_tag: release.tag,
       issue_number: String(issue.number),
-      evidence_fingerprint: fingerprint,
       attempt,
     },
   });
@@ -785,18 +699,10 @@ async function runWatch({ github, context, core, env, root }) {
   const runUrl = `${env.GITHUB_SERVER_URL || 'https://github.com'}/${owner}/${repo}/actions/runs/${env.GITHUB_RUN_ID}`;
   const decisions = new Map();
   const ready = [];
+  const stalled = [];
 
   for (const release of queue) {
-    const upstream = releases.find((entry) => entry.id === release.id);
     const baselineRelease = findSupportBaselineRelease(release, backlog.supported);
-    const baselineUpstream = baselineRelease ? releases.find((entry) => entry.id === baselineRelease.id) : null;
-    const fingerprint = computeEvidenceFingerprint({
-      release,
-      body: upstream ? upstream.body : '',
-      baselineRelease,
-      baselineBody: baselineUpstream ? baselineUpstream.body : '',
-      state,
-    });
     const existing = records.get(String(release.id));
     const ensured = await ensureTrackingIssue({
       github,
@@ -813,43 +719,44 @@ async function runWatch({ github, context, core, env, root }) {
     const record = ensured.issue
       ? { issue: ensured.issue, state: existing ? existing.state : null, staleAttempt: existing ? existing.staleAttempt : null }
       : null;
-    const decision = assessmentDecision({ record, fingerprint, retry: inputs.retry });
+    const decision = assessmentDecision({ record, retry: inputs.retry });
     decisions.set(String(release.id), decision);
-    if (decision.dispatch && record) {
-      ready.push({ release, issue: record.issue, fingerprint, priority: decision.priority, reconcile: decision.reconcile || null });
-    }
+    if (decision.stalled && record) stalled.push({ release, issue: record.issue, reason: decision.stalled });
+    if (decision.dispatch && record) ready.push({ release, issue: record.issue });
   }
 
-  ready.sort((a, b) => a.priority - b.priority || compareReleases(a.release, b.release));
+  ready.sort((a, b) => compareReleases(a.release, b.release));
   const limit = inputs.drainBacklog ? ready.length : LIMITS.maxQueuedPerRun;
   const selected = ready.slice(0, limit);
 
   if (!preview) {
-    for (const item of selected) {
-      const attempt = assessmentAttemptKey({
-        runId: env.GITHUB_RUN_ID,
-        runAttempt: env.GITHUB_RUN_ATTEMPT,
-        fingerprint: item.fingerprint,
+    // Record the dead attempt so the issue stops claiming an assessment is
+    // coming. This closes the ledger entry out; it deliberately does not queue
+    // a replacement, because an attempt that died on this release would keep
+    // dying on it, unattended, every week.
+    for (const item of stalled) {
+      await github.rest.issues.createComment({
+        owner,
+        repo,
+        issue_number: item.issue.number,
+        body: renderStateComment({
+          releaseId: item.release.id,
+          state: {
+            status: 'assessment-failed',
+            runId: env.GITHUB_RUN_ID || null,
+            runUrl,
+            note: `closed out ${item.reason}; re-run GDK Release Watch with release_tag: ${item.release.tag} and retry: true to assess it again`,
+            at: new Date().toISOString(),
+          },
+        }),
       });
-      if (item.reconcile) {
-        await github.rest.issues.createComment({
-          owner,
-          repo,
-          issue_number: item.issue.number,
-          body: renderStateComment({
-            releaseId: item.release.id,
-            state: {
-              status: 'assessment-failed',
-              fingerprint: item.fingerprint,
-              runId: env.GITHUB_RUN_ID || null,
-              runUrl,
-              note: `closed out ${item.reconcile} before re-queueing`,
-              at: new Date().toISOString(),
-            },
-          }),
-        });
-        core.warning(`GDK ${item.release.version}: closed out ${item.reconcile} and re-queued the assessment.`);
-      }
+      core.warning(
+        `GDK ${item.release.version}: ${item.reason} never reported back. Re-run this workflow with ` +
+          `release_tag: ${item.release.tag} and retry: true to assess it again.`,
+      );
+    }
+    for (const item of selected) {
+      const attempt = assessmentAttemptKey({ runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT });
       await github.rest.issues.createComment({
         owner,
         repo,
@@ -858,7 +765,6 @@ async function runWatch({ github, context, core, env, root }) {
           releaseId: item.release.id,
           state: {
             status: 'assessment-dispatched',
-            fingerprint: item.fingerprint,
             attempt,
             runId: env.GITHUB_RUN_ID || null,
             runUrl,
@@ -874,7 +780,6 @@ async function runWatch({ github, context, core, env, root }) {
           repo,
           release: item.release,
           issue: item.issue,
-          fingerprint: item.fingerprint,
           attempt,
           env,
         });
@@ -889,7 +794,6 @@ async function runWatch({ github, context, core, env, root }) {
             releaseId: item.release.id,
             state: {
               status: 'assessment-failed',
-              fingerprint: item.fingerprint,
               attempt,
               runId: env.GITHUB_RUN_ID || null,
               runUrl,
@@ -909,7 +813,7 @@ async function runWatch({ github, context, core, env, root }) {
   if (core.summary) await core.summary.addHeading('GDK release watcher', 2).addRaw(`\n\n${summary}\n`).write();
   core.setOutput('unsupported', String(backlog.unsupported.length));
   core.setOutput('dispatched', String(preview ? 0 : selected.length));
-  return { backlog, decisions, dispatched: preview ? [] : selected, preview, summary };
+  return { backlog, decisions, dispatched: preview ? [] : selected, stalled: preview ? [] : stalled, preview, summary };
 }
 
 module.exports = {
@@ -926,12 +830,11 @@ module.exports = {
   UPSTREAM_OWNER,
   UPSTREAM_REPO,
   WatchError,
+  ATTEMPT_PATTERN,
   assessmentAttemptKey,
   assessmentDecision,
   classifyRelease,
   compareReleases,
-  computeEvidenceFingerprint,
-  computeReviewedSourceDigest,
   editionOf,
   evaluateTrustedContext,
   findSupportBaselineRelease,
@@ -952,6 +855,7 @@ module.exports = {
   renderTrackingIssueTitle,
   runWatch,
   selectBacklog,
+  staleAttemptStatus,
   stateMarkerPrefix,
   statusOf,
   supportStatusFor,

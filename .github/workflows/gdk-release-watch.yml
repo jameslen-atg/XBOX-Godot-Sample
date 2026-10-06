@@ -1,8 +1,13 @@
 name: GDK Release Watch
 
 # Watches https://github.com/microsoft/GDK for stable releases this repository
-# does not support yet, files (or refreshes) a tracking issue for each one, and
-# dispatches the agentic assessor for the highest-priority release.
+# does not support yet, files a tracking issue for each one, and dispatches the
+# agentic assessor once per release.
+#
+# An assessment is a snapshot: it is pinned to the commit it analyzed and is
+# never repeated automatically, not when this repository changes and not when a
+# run fails. Re-running one is a deliberate act - dispatch this workflow with
+# `release_tag` and `retry: true`.
 #
 # Cross-repository `release` events cannot trigger a workflow here, so this runs
 # on a weekly schedule with manual dispatch for ad-hoc checks. All logic lives in
@@ -22,16 +27,16 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Assess only this GDK release tag (for example April-2026-Update-5-v2604.5.7903).'
+        description: 'Limit this run to one GDK release tag (for example April-2026-Update-5-v2604.5.7903). Required with retry.'
         required: false
         type: string
       retry:
-        description: 'Re-run the assessor even if this release was already assessed from the same evidence.'
+        description: 'Assess this release again, replacing nothing: a new report is appended. Needs release_tag.'
         required: false
         type: boolean
         default: false
       drain_backlog:
-        description: 'Dispatch every ready release instead of the single highest-priority one.'
+        description: 'Dispatch every release awaiting a first assessment instead of just the oldest one.'
         required: false
         type: boolean
         default: false

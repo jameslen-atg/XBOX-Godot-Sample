@@ -263,7 +263,7 @@ test('nightly and triage changes select only lightweight work', () => {
 test('gdk release watch changes select only lightweight work', () => {
   const watch = classify(
     'tools/ci/gdk_release_watch.cjs',
-    'tools/ci/gdk_support_update.cjs',
+    'tools/ci/gdk_release_assess.cjs',
     'tools/ci/tests/gdk_release_assess.test.cjs',
     '.github/workflows/gdk-release-watch.yml',
     '.github/workflows/gdk-release-assess.lock.yml',

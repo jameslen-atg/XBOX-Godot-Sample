@@ -3,8 +3,7 @@ name: GDK Release Watch Checks
 # Validates the GDK release watcher (gdk-release-watch.yml), the agentic
 # assessor (gdk-release-assess.md), and the deterministic helpers
 # (tools/ci/gdk_*.cjs). Deterministic only: no model calls, no secrets.
-#   * helper-tests  -- node:test suites for discovery, assessment, and the
-#                      support-list updater.
+#   * helper-tests  -- node:test suites for discovery and assessment.
 #   * compile-drift -- recompiles the assessor with the pinned gh-aw version and
 #                      fails if the committed .lock.yml differs.
 #                      Uses only the read-only GITHUB_TOKEN to download gh-aw.
@@ -15,7 +14,6 @@ on:
   pull_request:
     paths:
       - 'tools/ci/gdk_release_*'
-      - 'tools/ci/gdk_support_*'
       - 'tools/ci/tests/gdk_*'
       - '.github/workflows/gdk-release-*'
       - '.github/aw/**'
@@ -23,7 +21,6 @@ on:
     branches: [main]
     paths:
       - 'tools/ci/gdk_release_*'
-      - 'tools/ci/gdk_support_*'
       - 'tools/ci/tests/gdk_*'
       - '.github/workflows/gdk-release-*'
       - '.github/aw/**'
@@ -52,7 +49,6 @@ jobs:
           node --test
           tools/ci/tests/gdk_release_watch.test.cjs
           tools/ci/tests/gdk_release_assess.test.cjs
-          tools/ci/tests/gdk_support_update.test.cjs
 
   compile-drift:
     runs-on: ubuntu-latest

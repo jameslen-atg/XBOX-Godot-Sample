@@ -18,10 +18,6 @@ on:
         description: Tracking issue the assessment is posted to.
         required: true
         type: string
-      evidence_fingerprint:
-        description: Evidence digest computed by the watcher when it queued this release.
-        required: true
-        type: string
       attempt:
         description: >-
           Attempt id that queued this release. Copy the `attempt` value from the
@@ -138,18 +134,11 @@ safe-outputs:
             # `post` comments on the tracking issue. Set to `staged` to render
             # to the job summary only (docs/ci/gdk-release-watch.md).
             GDK_ASSESS_MODE: post
-            # `issue` writes the support-list change onto the tracking issue as
-            # an assignable task. `pull-request` would open the draft directly,
-            # but that needs the repository setting "Allow GitHub Actions to
-            # create and approve pull requests" plus `contents: write` and
-            # `pull-requests: write` restored above. Flip both or neither.
-            GDK_SUPPORT_PROPOSAL_MODE: issue
             GDK_ASSESS_INPUTS: ${{ toJSON(inputs) }}
             GDK_ASSESS_CONTEXT_PATH: ${{ runner.temp }}/gdk-release-assess-context/context.json
           with:
             script: |
               const assess = require(`${process.env.GITHUB_WORKSPACE}/tools/ci/gdk_release_assess.cjs`);
-              const support = require(`${process.env.GITHUB_WORKSPACE}/tools/ci/gdk_support_update.cjs`);
               await assess.publishAssessment({
                 github,
                 context,
@@ -158,8 +147,6 @@ safe-outputs:
                 root: process.env.GITHUB_WORKSPACE,
                 agentOutputPath: process.env.GH_AW_AGENT_OUTPUT,
                 contextPath: process.env.GDK_ASSESS_CONTEXT_PATH,
-                supportUpdate: (params) =>
-                  support.openSupportProposal({ github, core, context, env: process.env, ...params }),
               });
 ---
 
@@ -199,10 +186,6 @@ Review at least these areas and name the ones you reviewed:
   `.github/gdk-versions.json` — how an edition is selected and pinned.
 - `addons/godot_gdk_editortools/` and `tools/` — packaging and MakePkg flows.
 
-<!-- Keep this list in sync with REVIEWED_SOURCE_PATHS in
-     tools/ci/gdk_release_watch.cjs: those paths feed the evidence fingerprint,
-     which is what makes a source change invalidate a finished assessment. -->
-
 Treat as **required changes** only things with a concrete call site or build
 setting in this repository: a removed or renamed API we call, a changed
 signature or enum we pass, a new required initialization step, a changed
@@ -216,11 +199,11 @@ repository — mention them under optional improvements if they are worth doing.
 - `changes_required` — at least one concrete code, build, or tooling change is
   needed. Every required change must cite a real file and line range.
 - `tests_only` — nothing in this repository needs to change; the release only
-  needs to be added to the supported lists and validated locally. This verdict
-  can turn into a ready-to-apply support change, so it carries the highest bar:
-  `high` confidence, zero required changes, zero evidence gaps, at least three
-  *distinct* reviewed areas, and at least one validation task. If you cannot
-  meet all of those, use `needs_review`.
+  needs to be added to the supported lists and validated locally. A maintainer
+  may act on this verdict without re-reading the evidence, so it carries the
+  highest bar: `high` confidence, zero required changes, zero evidence gaps, at
+  least three *distinct* reviewed areas, and at least one validation task. If
+  you cannot meet all of those, use `needs_review`.
 - `needs_review` — the notes are ambiguous, the evidence is incomplete, or you
   cannot rule out an impact. This is the correct answer when you are unsure.
 

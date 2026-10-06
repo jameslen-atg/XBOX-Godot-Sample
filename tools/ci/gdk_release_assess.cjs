@@ -23,10 +23,9 @@ const {
 const {
   UPSTREAM_OWNER,
   UPSTREAM_REPO,
+  ATTEMPT_PATTERN,
   WatchError,
-  assessmentAttemptKey,
   classifyRelease,
-  computeEvidenceFingerprint,
   evaluateTrustedContext,
   findSupportBaselineRelease,
   latestState,
@@ -58,9 +57,9 @@ const LIMITS = Object.freeze({
 const CLASSIFICATIONS = Object.freeze(['changes_required', 'tests_only', 'needs_review']);
 const CONFIDENCE = Object.freeze(['high', 'medium', 'low']);
 
-// `tests_only` is the only classification that can open a pull request, so it
-// carries the strictest evidence bar. Everything here is a precondition for
-// claiming "nothing in this repository needs to change".
+// `tests_only` is the classification that says "nothing in this repository has
+// to change", which is the one a maintainer is most likely to act on without
+// re-reading the evidence. It therefore carries the strictest evidence bar.
 const TESTS_ONLY_REQUIREMENTS = Object.freeze({
   minReviewedAreas: 3,
   minValidationTasks: 1,
@@ -97,24 +96,23 @@ function readAssessInputs(env) {
   const inputs = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   const releaseId = String(inputs.release_id || '').trim();
   const issueNumber = Number(inputs.issue_number);
-  const fingerprint = String(inputs.evidence_fingerprint || '').trim();
   if (!/^\d+$/.test(releaseId)) throw new WatchError('release_id must be a numeric release id.');
   if (!Number.isInteger(issueNumber) || issueNumber <= 0) throw new WatchError('issue_number must be a positive integer.');
-  if (!/^[0-9a-f]{64}$/.test(fingerprint)) throw new WatchError('evidence_fingerprint must be a sha256 hex digest.');
   // The watcher stamps the attempt it queued, and that id is the only thing
-  // that distinguishes two dispatches over identical evidence. Deriving a
-  // substitute from the fingerprint does not work: it would never match the
+  // that distinguishes two dispatches for the same release. There is nothing to
+  // derive a substitute from: a made-up id would never match the
   // watcher-stamped id already in the ledger, so a manual dispatch that omitted
   // it could render a preview but never publish. Carry null instead and let the
   // publisher demand a real id, with an error that says where to find it.
   const rawAttempt = String(inputs.attempt || '').trim();
-  const attempt = rawAttempt ? assessmentAttemptKey({ runId: rawAttempt, fingerprint }) : null;
+  if (rawAttempt && !ATTEMPT_PATTERN.test(rawAttempt)) {
+    throw new WatchError(`attempt ${JSON.stringify(rawAttempt)} is not a valid assessment attempt id.`);
+  }
   return {
     releaseId,
     releaseTag: String(inputs.release_tag || '').trim() || null,
     issueNumber,
-    fingerprint,
-    attempt,
+    attempt: rawAttempt || null,
   };
 }
 
@@ -255,18 +253,6 @@ async function prepareAssessmentContext({ github, context, core, env, root, outD
 
   const baselineRelease = findSupportBaselineRelease(release, backlog.supported);
   const baselineUpstream = baselineRelease ? releases.find((entry) => entry.id === baselineRelease.id) : null;
-  const fingerprint = computeEvidenceFingerprint({
-    release,
-    body: upstream.body,
-    baselineRelease,
-    baselineBody: baselineUpstream ? baselineUpstream.body : '',
-    state,
-  });
-  if (fingerprint !== inputs.fingerprint) {
-    throw new WatchError(
-      'The upstream release or this repository changed after the assessment was queued; the watcher will requeue it.',
-    );
-  }
 
   const { markdown, evidence } = buildAssessmentContext({
     release,
@@ -283,7 +269,6 @@ async function prepareAssessmentContext({ github, context, core, env, root, outD
     repo: `${context.repo.owner}/${context.repo.repo}`,
     issue: inputs.issueNumber,
     sha,
-    fingerprint,
     attempt: inputs.attempt,
     evidence,
     release: {
@@ -409,8 +394,9 @@ function validateReport(report) {
 
 // A malformed report is a hard error, but a merely over-confident one is not:
 // it is downgraded to `needs_review` with the reason recorded in the posted
-// comment. Only `tests_only` can open a pull request, so the bar it has to
-// clear is the bar that keeps an unvalidated SDK out of the support lists.
+// comment. `tests_only` is the verdict that invites a maintainer to move the
+// support lists without re-reading the evidence, so the bar it has to clear is
+// the bar that keeps an unvalidated SDK out of those lists.
 //
 // `evidence` is the trusted record of what the context builder actually fed the
 // agent. It is deliberately not sourced from the report: a model that never saw
@@ -501,7 +487,7 @@ function validateAgentOutput({ core, agentOutputPath, root, evidence }) {
 
 const CLASSIFICATION_LABELS = Object.freeze({
   changes_required: '🛠️ Changes required',
-  tests_only: '✅ Tests only (proposed)',
+  tests_only: '✅ No source change identified',
   needs_review: '🔍 Needs human review',
 });
 
@@ -529,6 +515,79 @@ function renderFindings({ findings, citations, owner, repo, sha }) {
   });
 }
 
+// The files that define what "supported" means. The CMake allowlist governs an
+// SDK installed on disk; the rest govern the vcpkg `ms-gdk` port a hosted
+// runner restores. They are named, not edited: this automation cannot open pull
+// requests here, and an exact patch would be pinned to the commit this report
+// describes rather than to whatever `main` looks like when someone picks the
+// work up.
+const SUPPORT_LIST_FILES = Object.freeze([
+  ['cmake/GDKDependencies.cmake', 'the allowlist of editions an installed GDK may satisfy'],
+  ['.github/gdk-versions.json', 'the hosted vcpkg matrix CI restores from'],
+  ['vcpkg-configuration.json', 'the registry baseline that pins which port versions are resolvable'],
+  ['vcpkg.json', 'the `ms-gdk` version override'],
+]);
+
+// The work differs by verdict, but every verdict ends in the same place: a
+// draft pull request that honestly records that nothing was validated.
+const CLASSIFICATION_WORK = Object.freeze({
+  changes_required: [
+    'Work through **Required changes** above. Each entry is a permalink into the snapshot commit, so',
+    '  open the current version of that file and confirm the finding still applies before changing it.',
+    '- Treat **Optional improvements** as follow-up candidates, not part of this change.',
+    '- Only once the source compiles against the new edition, add it to the supported-version lists below.',
+  ],
+  tests_only: [
+    'The assessor found no source change it could justify from the release notes. That is a claim about',
+    '  the snapshot commit, not a guarantee — skim the release notes and the areas listed under',
+    '  *Areas reviewed* before you rely on it, and reopen the question if this repository has moved since.',
+    '- If it still holds, the whole change is the supported-version lists below.',
+  ],
+  needs_review: [
+    'Resolve the open questions first. **Evidence gaps** above says what the assessor could not see;',
+    '  close those gaps from the upstream release notes and documentation before changing anything.',
+    '- Decide whether this release needs source changes. If it does, treat the required-changes path as',
+    '  the template; if it does not, it is a supported-version-list change.',
+    '- Do not move the version lists while the classification is still unresolved.',
+  ],
+});
+
+// `tests_only` is the one verdict whose "no source change" claim a maintainer
+// might act on without re-reading anything, so it is the one that most needs
+// the scope note.
+function renderImplementationChecklist({ report, release, sha }) {
+  const work = CLASSIFICATION_WORK[report.classification] || CLASSIFICATION_WORK.needs_review;
+  return [
+    '### How to pick this up',
+    '',
+    'Assign this issue to GitHub Copilot, or take it yourself. This section is the whole brief.',
+    '',
+    '> [!IMPORTANT]',
+    '> **You cannot validate this SDK, and you must not claim that you did.** Proving support means',
+    `> building this repository on Windows against GDK \`${release.edition}\`, which no hosted agent can do.`,
+    '> Produce the change and a **draft** pull request that records the validation as *not yet run*.',
+    '',
+    `1. Re-read [\`${release.tag}\`](${release.url}) and re-check this report against current \`main\`. It describes`,
+    `   \`${sha.slice(0, 12)}\`; if the repository has moved, derive the change from what is there now rather than`,
+    '   from this snapshot.',
+    `2. ${work.join('\n   ')}`,
+    `3. Add GDK \`${release.version}\` (edition \`${release.edition}\`) to the supported-version lists, keeping every`,
+    '   existing entry:',
+    '',
+    ...SUPPORT_LIST_FILES.map(([file, why]) => `   - \`${file}\` — ${why}`),
+    '',
+    `   The vcpkg files only change if \`ms-gdk ${release.version}\` is actually published in the public vcpkg`,
+    '   registry; check before editing them. If it is not published, this release is installed-GDK only and the',
+    '   hosted matrix stays as it is — say so in the pull request.',
+    '4. Open a **draft** pull request against `main`, linked to this issue, filling in',
+    '   `.github/PULL_REQUEST_TEMPLATE.md` with every heading and checklist item intact. Under **Validation**,',
+    '   state plainly that nothing has been run; do not tick a validation box and do not invent results.',
+    '5. Hand it to a maintainer to build and test against the real SDK. `docs/ci/gdk-release-watch.md`',
+    '   describes that handoff; `tools/run_all_tests.ps1` is the canonical local suite.',
+    '',
+  ];
+}
+
 function renderAssessmentComment({
   report,
   citations,
@@ -541,10 +600,7 @@ function renderAssessmentComment({
   repo,
   sha,
   runUrl,
-  pullRequestUrl,
   attemptKey,
-  proposal,
-  proposalError,
 }) {
   const lines = [
     `<!-- xbox-godot-gdk-release-assessment id=${release.id} sha=${sha} attempt=${attemptKey || 'preview'} -->`,
@@ -565,7 +621,7 @@ function renderAssessmentComment({
     lines.push(
       '> [!WARNING]',
       `> The assessor reported \`${original}\`, which was downgraded to \`needs_review\` because`,
-      `> ${escapeMarkdown(downgradeReason).replace(/\n/g, ' ')}. No support change was proposed.`,
+      `> ${escapeMarkdown(downgradeReason).replace(/\n/g, ' ')}. Resolve that before acting on the report.`,
       '',
     );
   }
@@ -625,37 +681,7 @@ function renderAssessmentComment({
     lines.push('');
   }
 
-  if (pullRequestUrl) {
-    lines.push('### Proposed support change', '', `A draft pull request is open for local validation: ${pullRequestUrl}`, '');
-  } else if (proposal && proposal.instructions) {
-    // The automation is not permitted to open pull requests here, so the whole
-    // change has to travel as a task description. Assign this issue to Copilot
-    // (or do it by hand) and the section below is the complete brief.
-    lines.push(
-      '### Proposed support change — assign this issue to complete it',
-      '',
-      proposal.fallbackReason
-        ? `Opening the pull request automatically failed (\`${escapeMarkdown(proposal.fallbackReason).replace(/\n/g, ' ')}\`), so the change is described below instead.`
-        : 'This automation cannot open pull requests in this repository, so the change is described below instead.',
-      '',
-      proposal.instructions,
-      '',
-    );
-  } else if (proposalError) {
-    lines.push(
-      '### Proposed support change',
-      '',
-      `The support change could not be derived: ${escapeMarkdown(proposalError).replace(/\n/g, ' ')}`,
-      '',
-    );
-  } else if (report.classification === 'tests_only') {
-    lines.push(
-      '### Proposed support change',
-      '',
-      'No support change was prepared for this report; see the watcher state comment for the reason.',
-      '',
-    );
-  }
+  lines.push(...renderImplementationChecklist({ report, release, sha }));
 
   lines.push(
     '---',
@@ -698,11 +724,10 @@ async function findExistingAssessment({ github, owner, repo, issueNumber, releas
   return { reports, comments };
 }
 
-// An explicit retry re-queues the same evidence, so the fingerprint cannot
-// identify an attempt. The watcher run that queued the work can. The key is
-// taken from this run's dispatch inputs and never re-read from the ledger: a
-// concurrent retry moves the ledger on, and adopting its id would let this
-// older run publish its report as that retry's result.
+// Two dispatches for the same release are told apart only by the watcher run
+// that queued them. The key is taken from this run's dispatch inputs and never
+// re-read from the ledger: a concurrent retry moves the ledger on, and adopting
+// its id would let this older run publish its report as that retry's result.
 function findAssessmentForAttempt({ reports, attemptKey }) {
   const marker = ` attempt=${attemptKey} `;
   return reports.find((comment) => comment.body.split('\n', 1)[0].includes(marker)) || null;
@@ -710,15 +735,12 @@ function findAssessmentForAttempt({ reports, attemptKey }) {
 
 // Re-reads the watcher's own state ledger rather than trusting the dispatch
 // inputs: a run that is no longer the in-flight assessment must not publish.
-function assertDispatchIsCurrent({ state, fingerprint, attempt }) {
+function assertDispatchIsCurrent({ state, attempt }) {
   if (state.status !== 'assessment-dispatched') {
     throw new WatchError(`The watcher state for this release is \`${state.status}\`, not an in-flight assessment.`);
   }
-  if (state.fingerprint !== fingerprint) {
-    throw new WatchError('A newer assessment was queued for this release; this run will not publish.');
-  }
-  // Same evidence, different attempt: a retry was queued while this run was
-  // still working. Publishing now would settle that retry with a stale report.
+  // A retry was queued while this run was still working. Publishing now would
+  // settle that retry with a stale report.
   if (attempt && state.attempt && state.attempt !== attempt) {
     throw new WatchError(
       `Attempt \`${state.attempt}\` is now in flight for this release; this run (\`${attempt}\`) will not publish.`,
@@ -727,38 +749,14 @@ function assertDispatchIsCurrent({ state, fingerprint, attempt }) {
   return state;
 }
 
-// Re-reads the ledger mid-flight and re-applies the currency check. Used after
-// the long support-preparation await so that a retry queued in the meantime
-// stops this run before it posts, instead of after.
-async function reloadStateForAttempt({
-  github,
-  owner,
-  repo,
-  issueNumber,
-  releaseId,
-  botLogin,
-  fingerprint,
-  attempt,
-  fallback,
-}) {
-  const { comments } = await findExistingAssessment({ github, owner, repo, issueNumber, releaseId, botLogin });
-  const found = latestState(comments, releaseId, botLogin);
-  // A ledger entry that vanished between the two reads is not evidence that
-  // this run is still current, but it is also not evidence that it is stale.
-  // Fall back to the snapshot the run already validated.
-  const state = found ? found.state : fallback.state;
-  assertDispatchIsCurrent({ state, fingerprint, attempt });
-  return found || fallback;
-}
-
-async function publishAssessment({ github, context, core, env, root, agentOutputPath, contextPath, supportUpdate }) {
+async function publishAssessment({ github, context, core, env, root, agentOutputPath, contextPath }) {
   const { owner, repo } = context.repo;
   const sha = env.GITHUB_SHA;
   const botLogin = env.GDK_WATCH_BOT_LOGIN || DEFAULT_BOT_LOGIN;
   // The assessor is independently dispatchable, so the watcher's trusted-context
-  // check does not cover it. Without this, a feature-branch dispatch could reuse
-  // a queued fingerprint and publish comments derived from that branch's
-  // snapshot of the support lists. Untrusted runs render a preview instead.
+  // check does not cover it. Without this, a feature-branch dispatch could
+  // publish comments derived from that branch's snapshot of the support lists.
+  // Untrusted runs render a preview instead.
   const trust = evaluateTrustedContext({ context, env });
   if (!trust.trusted) core.notice(`Staged preview only: ${trust.reason}.`);
   const staged = env.GDK_ASSESS_MODE !== 'post' || !trust.trusted;
@@ -768,9 +766,6 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
   const inputs = readAssessInputs(env);
   if (prepared.sha !== sha || prepared.issue !== inputs.issueNumber || String(prepared.release.id) !== inputs.releaseId) {
     throw new WatchError('Prepared context does not match this assessment run.');
-  }
-  if (prepared.fingerprint !== inputs.fingerprint) {
-    throw new WatchError('Prepared context was built for a different evidence fingerprint.');
   }
   if (prepared.attempt && prepared.attempt !== inputs.attempt) {
     throw new WatchError('Prepared context was built for a different assessment attempt.');
@@ -789,7 +784,6 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
       repo,
       sha,
       runUrl,
-      pullRequestUrl: null,
     });
     await core.summary.addHeading('Staged GDK assessment preview', 2).addRaw(`\n\n${body}\n`).write();
     core.notice('Staged mode: the assessment was rendered to the step summary and not posted.');
@@ -837,9 +831,7 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     // this older run's result and then block the retry from publishing.
     let repaired = false;
     const inFlightIsThisAttempt =
-      found.state.status === 'assessment-dispatched' &&
-      found.state.fingerprint === inputs.fingerprint &&
-      (!found.state.attempt || found.state.attempt === attemptKey);
+      found.state.status === 'assessment-dispatched' && (!found.state.attempt || found.state.attempt === attemptKey);
     if (found.state.status === 'assessment-dispatched' && !inFlightIsThisAttempt) {
       core.notice(
         `Leaving the ledger alone: attempt \`${found.state.attempt || 'unknown'}\` is in flight, not \`${attemptKey}\`.`,
@@ -854,7 +846,6 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
           releaseId: prepared.release.id,
           state: {
             status: STATUS_FOR_CLASSIFICATION[validated.report.classification],
-            fingerprint: inputs.fingerprint,
             attempt: attemptKey,
             runId: found.state.runId || null,
             runUrl: found.state.runUrl || null,
@@ -870,40 +861,8 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     }
     return { posted: false, existing: existing.html_url, repaired, classification: validated.report.classification };
   }
-  assertDispatchIsCurrent({ state: found.state, fingerprint: inputs.fingerprint, attempt: attemptKey });
+  assertDispatchIsCurrent({ state: found.state, attempt: attemptKey });
 
-  let proposal = null;
-  let proposalNote = null;
-  if (validated.report.classification === 'tests_only' && typeof supportUpdate === 'function') {
-    try {
-      proposal = await supportUpdate({ release: prepared.release, issueNumber: inputs.issueNumber, sha, runUrl });
-    } catch (error) {
-      // A failed proposal must not swallow the assessment: post the report, and
-      // record why no support change accompanies it.
-      proposalNote = error.message;
-      core.warning(`The support change could not be prepared: ${error.message}`);
-    }
-  }
-
-  // Preparing a support change walks the vcpkg registry, which is by far the
-  // longest await in this function and the widest window for the watcher to
-  // queue a retry underneath us. Re-read the ledger and re-assert before the
-  // report and the terminal state go out. GitHub issue comments offer no
-  // compare-and-swap, so this narrows the race rather than closing it; the
-  // residual window is the few hundred milliseconds between this read and the
-  // writes below, and the watcher's own staleness reconciliation recovers a
-  // retry that loses it.
-  const current = await reloadStateForAttempt({
-    github,
-    owner,
-    repo,
-    issueNumber: inputs.issueNumber,
-    releaseId: inputs.releaseId,
-    botLogin,
-    fingerprint: inputs.fingerprint,
-    attempt: attemptKey,
-    fallback: found,
-  });
   const body = renderAssessmentComment({
     ...validated,
     report: validated.report,
@@ -913,10 +872,7 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     repo,
     sha,
     runUrl,
-    pullRequestUrl: proposal ? proposal.url || null : null,
     attemptKey,
-    proposal,
-    proposalError: proposalNote,
   });
   const { data: comment } = await github.rest.issues.createComment({
     owner,
@@ -934,15 +890,11 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
       releaseId: prepared.release.id,
       state: {
         status: STATUS_FOR_CLASSIFICATION[validated.report.classification],
-        fingerprint: inputs.fingerprint,
         attempt: attemptKey,
-        runId: current.state.runId || null,
-        runUrl: current.state.runUrl || null,
+        runId: found.state.runId || null,
+        runUrl: found.state.runUrl || null,
         assessorRunUrl: runUrl,
         assessmentUrl: comment.html_url,
-        pullRequest: proposal ? proposal.url || null : null,
-        supportBranch: proposal ? proposal.branch || null : null,
-        note: proposalNote ? `support change skipped: ${proposalNote}` : null,
         at: new Date().toISOString(),
       },
     }),
@@ -952,8 +904,6 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     posted: true,
     url: comment.html_url,
     classification: validated.report.classification,
-    pullRequest: proposal ? proposal.url || null : null,
-    proposalMode: proposal ? proposal.mode || null : null,
     body,
   };
 }
