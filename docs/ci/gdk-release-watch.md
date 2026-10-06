@@ -140,9 +140,12 @@ Because the attempt id cannot be reconstructed, dispatching the assessor
 *directly* requires copying the `attempt` value out of the in-flight state
 comment on the tracking issue; a run that omits it renders its staged preview and
 then refuses to post. Going through the watcher — the supported path — never
-requires that. GitHub comments have no compare-and-swap, so a narrow window
-remains between the final ledger read and the write; the six-hour staleness sweep
-above is what recovers a retry that loses it.
+requires that, and never puts two attempts in flight on one release: a retry
+aimed at a release that is still being assessed is refused with a warning naming
+the live run. GitHub comments have no compare-and-swap, so two concurrent
+attempts would race between the final ledger read and the write; keeping one
+attempt in flight at a time is what makes that race unreachable. The six-hour
+staleness sweep above is what releases the next attempt when one dies.
 
 ### Manual dispatch
 
@@ -151,7 +154,7 @@ Run **GDK Release Watch** from the Actions tab:
 | Input | Effect |
 | ----- | ------ |
 | `release_tag` | Act on exactly this tag instead of the oldest release awaiting assessment. |
-| `retry` | Assess again even though the release already has a report. Reports are snapshots, so this is the only way to refresh one. **Requires `release_tag`**: a retry spends a model run and overrides the terminal-state guard, so it has to name one release. The run fails fast if it is set alone. |
+| `retry` | Assess again even though the release already has a report. Reports are snapshots, so this is the only way to refresh one. **Requires `release_tag`**: a retry spends a model run and overrides the terminal-state guard, so it has to name one release. The run fails fast if it is set alone. A retry is refused while an assessment is still in flight — wait for it, or for the six-hour staleness sweep to close it out. |
 | `drain_backlog` | Dispatch an assessment for every release awaiting one, not just the oldest. |
 | `preview` | Report only. No issue, comment, or dispatch is written. |
 

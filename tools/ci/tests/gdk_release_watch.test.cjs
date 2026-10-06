@@ -456,6 +456,31 @@ test('assessmentDecision honours an explicit retry over a settled state', () => 
   assert.equal(watch.assessmentDecision({ record: failed, retry: true }).dispatch, true);
 });
 
+test('an explicit retry never runs alongside a live attempt', () => {
+  // Two live attempts race each other through a ledger with no compare-and-swap:
+  // the older one can read the ledger before the retry is recorded, publish, and
+  // leave its terminal state as the latest entry. The retry then sees a settled
+  // release, refuses to publish, and no sweep recovers it.
+  const live = {
+    issue: { number: 1, state: 'open' },
+    state: { status: 'assessment-dispatched', runId: 7, attempt: '7.1' },
+    staleAttempt: null,
+  };
+  const decision = watch.assessmentDecision({ record: live, retry: true });
+  assert.equal(decision.dispatch, false, 'a retry must not queue a second concurrent attempt');
+  assert.equal(decision.refusedRetry, true);
+  assert.match(decision.reason, /already in flight \(run 7\)/);
+  assert.match(decision.reason, /finished or timed out/, 'the reason must say when the retry becomes available');
+
+  // Once the attempt ages out it is dead, not in flight, so the documented
+  // recovery lever works again -- and without a redundant stalled sweep.
+  const dead = { ...live, staleAttempt: 'a timed-out attempt' };
+  const recovered = watch.assessmentDecision({ record: dead, retry: true });
+  assert.equal(recovered.dispatch, true);
+  assert.equal(recovered.stalled, undefined, 'a retry supersedes the close-out comment');
+  assert.match(recovered.reason, /timed-out attempt/);
+});
+
 // ---------------------------------------------------------------------------
 // State comments
 // ---------------------------------------------------------------------------
@@ -708,6 +733,18 @@ test('a watcher re-run with the same run id queues a distinguishable attempt', a
   };
 
   await watch.runWatch({ github, context: CONTEXT, core: fakeCore(), env: retry, root: makeSupportFixture() });
+  // Settle the first attempt before re-running. A retry is refused while an
+  // attempt is still in flight, so without this the second run would queue
+  // nothing and the attempt ids could not be compared at all.
+  await github.rest.issues.createComment({
+    owner: OWNER,
+    repo: REPO,
+    issue_number: github.state.createdIssues[0].number,
+    body: watch.renderStateComment({
+      releaseId: Number(github.state.dispatches[0].inputs.release_id),
+      state: { status: 'tests-only', attempt: '555.1', at: new Date().toISOString() },
+    }),
+  });
   await watch.runWatch({
     github,
     context: CONTEXT,
@@ -882,6 +919,49 @@ test('an explicit retry recovers a release the watcher closed out as failed', as
     github.state.dispatches.map((entry) => entry.inputs.release_id),
     ['2'],
   );
+});
+
+test('a retry targeting a live attempt dispatches nothing and says why', async () => {
+  const release = eligible(makeRelease({ id: 2 }));
+  const issue = trackingIssue({ number: 100, releaseId: 2, release });
+  const github = fakeGithub({
+    releases: watchReleases(),
+    issues: [issue],
+    comments: {
+      100: [
+        {
+          id: 1,
+          user: { login: BOT },
+          body: watch.renderStateComment({
+            releaseId: 2,
+            state: { status: 'assessment-dispatched', runId: '77', attempt: '77.1', at: new Date().toISOString() },
+          }),
+        },
+      ],
+    },
+  });
+  const core = fakeCore();
+  const result = await watch.runWatch({
+    github,
+    context: CONTEXT,
+    core,
+    env: {
+      ...TRUSTED_ENV,
+      GDK_WATCH_INPUTS: JSON.stringify({ release_tag: release.tag, retry: true }),
+    },
+    root: makeSupportFixture(),
+  });
+
+  assert.equal(result.decisions.get('2').dispatch, false);
+  assert.equal(result.decisions.get('2').refusedRetry, true);
+  assert.equal(github.state.dispatches.length, 0, 'the live attempt keeps the release to itself');
+  const bodies = github.state.createdComments.filter((entry) => entry.issue === 100).map((entry) => entry.body);
+  assert.deepEqual(bodies, [], 'the ledger is untouched, so the live attempt still recognises itself');
+  assert.ok(
+    core.warnings.some((message) => /already in flight \(run 77\)/.test(message)),
+    'a refused retry has to be visible on the run, not only in the summary table',
+  );
+  assert.match(result.summary, /retry once it has finished or timed out/);
 });
 
 test('a failed dispatch is recorded instead of leaving the ledger in flight', async () => {

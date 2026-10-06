@@ -590,17 +590,34 @@ function assessmentDecision({ record, retry }) {
   if (record.issue.state === 'closed') return { dispatch: false, reason: 'tracking issue is closed' };
   const state = record.state;
   if (!state) return { dispatch: true, reason: 'tracking issue has no recorded state' };
-  if (retry) return { dispatch: true, reason: 'explicit retry requested' };
+  // The in-flight check comes before the retry lever on purpose. Two live
+  // attempts for one release race each other through a ledger that has no
+  // compare-and-swap: the older one can read the ledger before the retry is
+  // recorded, publish, and leave its own terminal state as the latest entry.
+  // The retry then finds the release settled, refuses to publish, and nothing
+  // ages it out -- the ledger looks finished. Keeping one attempt in flight at
+  // a time is what makes that unreachable.
   if (state.status === 'assessment-dispatched') {
     // An attempt whose run already finished without posting is dead, not in
     // flight. Say so on the issue so the failure is visible, but do not start
-    // another assessment: a run that died because the agent crashed on this
-    // release would otherwise fail the same way every week, unattended.
+    // another assessment on our own: a run that died because the agent crashed
+    // on this release would otherwise fail the same way every week, unattended.
+    // A maintainer asking for it explicitly is a different matter.
     if (record.staleAttempt) {
+      if (retry) return { dispatch: true, reason: `explicit retry after ${record.staleAttempt}` };
       return { dispatch: false, reason: `the previous attempt ended as ${record.staleAttempt}`, stalled: record.staleAttempt };
     }
-    return { dispatch: false, reason: `an assessment is already in flight (run ${state.runId || 'unknown'})` };
+    const inFlight = `an assessment is already in flight (run ${state.runId || 'unknown'})`;
+    if (retry) {
+      return {
+        dispatch: false,
+        refusedRetry: true,
+        reason: `${inFlight}; retry once it has finished or timed out`,
+      };
+    }
+    return { dispatch: false, reason: inFlight };
   }
+  if (retry) return { dispatch: true, reason: 'explicit retry requested' };
   if (state.status === 'assessment-failed') {
     return { dispatch: false, reason: 'the previous assessment failed; dispatch a retry to try again' };
   }
@@ -753,6 +770,12 @@ async function runWatch({ github, context, core, env, root }) {
       : null;
     const decision = assessmentDecision({ record, retry: inputs.retry });
     decisions.set(String(release.id), decision);
+    if (decision.refusedRetry) {
+      core.warning(
+        `GDK ${release.version}: ${decision.reason}. Nothing was dispatched; a second attempt would race the ` +
+          `first one through the tracking issue's ledger.`,
+      );
+    }
     if (decision.stalled && record) stalled.push({ release, issue: record.issue, reason: decision.stalled });
     if (decision.dispatch && record) ready.push({ release, issue: record.issue });
   }
