@@ -358,6 +358,23 @@ test('computeEvidenceFingerprint tracks evidence and ignores cosmetic metadata',
   assert.notEqual(watch.computeEvidenceFingerprint({ release, body: 'notes', baselineRelease: null, state: moved }), base);
 });
 
+test('computeEvidenceFingerprint tracks the baseline notes the delta is computed against', () => {
+  // `releaseNoteDelta` subtracts the baseline body from the candidate body, so
+  // an upstream edit to the baseline alone still changes the agent's evidence.
+  const state = watch.readSupportState(makeSupportFixture());
+  const release = eligible(makeRelease());
+  const baselineRelease = { id: 11, tag: 'April-2026-Update-1-v2604.1.7839' };
+  const withBaseline = (baselineBody) =>
+    watch.computeEvidenceFingerprint({ release, body: 'notes', baselineRelease, baselineBody, state });
+
+  assert.equal(withBaseline('baseline notes'), withBaseline('baseline notes'));
+  assert.notEqual(withBaseline('baseline notes v2'), withBaseline('baseline notes'));
+  assert.notEqual(
+    withBaseline('baseline notes'),
+    watch.computeEvidenceFingerprint({ release, body: 'notes', baselineRelease: null, state }),
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Assessment decisions
 // ---------------------------------------------------------------------------

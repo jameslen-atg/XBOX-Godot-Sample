@@ -314,11 +314,15 @@ function sha256(value) {
 
 // One fingerprint over everything an assessment actually depends on. Cosmetic
 // upstream metadata edits must not burn another model run.
-function computeEvidenceFingerprint({ release, body, baselineRelease, state }) {
+function computeEvidenceFingerprint({ release, body, baselineRelease, baselineBody, state }) {
   const canonical = JSON.stringify({
     release: { id: release.id, tag: release.tag, version: release.version, asset: release.asset },
     body: sha256(String(body || '')),
-    baseline: baselineRelease ? { id: baselineRelease.id, tag: baselineRelease.tag } : null,
+    // The baseline body is evidence too: `releaseNoteDelta` subtracts it from
+    // the candidate notes, so editing it alone changes what the agent reads.
+    baseline: baselineRelease
+      ? { id: baselineRelease.id, tag: baselineRelease.tag, body: sha256(String(baselineBody || '')) }
+      : null,
     support: {
       installed: [...state.installedEditions].sort(),
       hosted: state.hosted.supported.map((entry) => entry.version).sort(),
@@ -665,10 +669,12 @@ async function runWatch({ github, context, core, env, root }) {
   for (const release of queue) {
     const upstream = releases.find((entry) => entry.id === release.id);
     const baselineRelease = findSupportBaselineRelease(release, backlog.supported);
+    const baselineUpstream = baselineRelease ? releases.find((entry) => entry.id === baselineRelease.id) : null;
     const fingerprint = computeEvidenceFingerprint({
       release,
       body: upstream ? upstream.body : '',
       baselineRelease,
+      baselineBody: baselineUpstream ? baselineUpstream.body : '',
       state,
     });
     const existing = records.get(String(release.id));

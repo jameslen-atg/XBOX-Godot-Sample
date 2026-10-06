@@ -235,7 +235,13 @@ async function prepareAssessmentContext({ github, context, core, env, root, outD
 
   const baselineRelease = findSupportBaselineRelease(release, backlog.supported);
   const baselineUpstream = baselineRelease ? releases.find((entry) => entry.id === baselineRelease.id) : null;
-  const fingerprint = computeEvidenceFingerprint({ release, body: upstream.body, baselineRelease, state });
+  const fingerprint = computeEvidenceFingerprint({
+    release,
+    body: upstream.body,
+    baselineRelease,
+    baselineBody: baselineUpstream ? baselineUpstream.body : '',
+    state,
+  });
   if (fingerprint !== inputs.fingerprint) {
     throw new WatchError(
       'The upstream release or this repository changed after the assessment was queued; the watcher will requeue it.',
