@@ -597,6 +597,18 @@ test('the attempt id comes from dispatch inputs, not from the ledger', () => {
   // Derived once by the watcher and carried as an input, so a concurrent retry
   // moving the ledger on cannot change what this run believes it is.
   assert.equal(watch.assessmentAttemptKey({ runId: 4242, fingerprint: FINGERPRINT }), '4242');
+  assert.equal(watch.assessmentAttemptKey({ runId: 4242, runAttempt: 2, fingerprint: FINGERPRINT }), '4242.2');
+  // Re-running a watcher workflow keeps GITHUB_RUN_ID and only bumps
+  // GITHUB_RUN_ATTEMPT, so the run id alone would hand the re-run the first
+  // attempt's identity -- and the assessor would discard its report as an
+  // already-posted duplicate.
+  assert.notEqual(
+    watch.assessmentAttemptKey({ runId: 4242, runAttempt: 1, fingerprint: FINGERPRINT }),
+    watch.assessmentAttemptKey({ runId: 4242, runAttempt: 2, fingerprint: FINGERPRINT }),
+  );
+  // An assessor re-run keeps the id it was dispatched with: normalising an
+  // already-qualified input has to be a no-op.
+  assert.equal(watch.assessmentAttemptKey({ runId: '4242.2', fingerprint: FINGERPRINT }), '4242.2');
   assert.equal(watch.assessmentAttemptKey({ fingerprint: FINGERPRINT }), `fingerprint-${FINGERPRINT}`);
   assert.throws(() => watch.assessmentAttemptKey({ runId: 'a -->b', fingerprint: FINGERPRINT }), /Unusable assessment attempt id/);
 

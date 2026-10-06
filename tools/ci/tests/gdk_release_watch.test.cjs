@@ -198,6 +198,7 @@ const CONTEXT = { repo: { owner: OWNER, repo: REPO } };
 const TRUSTED_ENV = {
   GITHUB_REF: watch.TRUSTED_REF,
   GITHUB_RUN_ID: '555',
+  GITHUB_RUN_ATTEMPT: '1',
   GITHUB_SERVER_URL: 'https://github.com',
   GDK_WATCH_TARGET_REPO: `${OWNER}/${REPO}`,
 };
@@ -593,8 +594,8 @@ test('runWatch opens one tracking issue per release but dispatches only one asse
   assert.equal(watch.parseStateComment(stateComment.body).fingerprint, dispatch.inputs.evidence_fingerprint);
   // The attempt id travels as a dispatch input so the assessor never has to
   // re-derive it from a ledger a concurrent retry may already have moved on.
-  assert.equal(dispatch.inputs.attempt, '555');
-  assert.equal(watch.parseStateComment(stateComment.body).attempt, '555');
+  assert.equal(dispatch.inputs.attempt, '555.1');
+  assert.equal(watch.parseStateComment(stateComment.body).attempt, '555.1');
   assert.equal(core.outputs.dispatched, '1');
 });
 
@@ -643,6 +644,29 @@ test('ensureTrackingLabel leaves an existing label alone and tolerates a concurr
     () => watch.ensureTrackingLabel({ github: broken, core: fakeCore(), owner: OWNER, repo: REPO }),
     /Bad credentials/,
   );
+});
+
+test('a watcher re-run with the same run id queues a distinguishable attempt', async () => {
+  // Re-running the watcher workflow preserves GITHUB_RUN_ID and only bumps
+  // GITHUB_RUN_ATTEMPT. If the attempt id were the run id alone, the re-run's
+  // assessment would carry the first attempt's identity: the assessor would
+  // either discard it as already posted, or be unable to tell it apart from an
+  // assessment still in flight.
+  const github = fakeGithub({ releases: watchReleases() });
+  const retry = { ...TRUSTED_ENV, GDK_WATCH_INPUTS: JSON.stringify({ retry: true }) };
+
+  await watch.runWatch({ github, context: CONTEXT, core: fakeCore(), env: retry, root: makeSupportFixture() });
+  await watch.runWatch({
+    github,
+    context: CONTEXT,
+    core: fakeCore(),
+    env: { ...retry, GITHUB_RUN_ATTEMPT: '2' },
+    root: makeSupportFixture(),
+  });
+
+  const attempts = github.state.dispatches.map((entry) => entry.inputs.attempt);
+  assert.deepEqual(attempts, ['555.1', '555.2']);
+  assert.equal(new Set(attempts).size, attempts.length, 'the re-run must not reuse the first attempt id');
 });
 
 test('runWatch drains the whole backlog only when asked', async () => {

@@ -625,11 +625,17 @@ async function loadRecords({ github, owner, repo, botLogin, backlog, now = Date.
 
 // Identifies one dispatch attempt. A retry re-queues the same evidence, so the
 // fingerprint cannot tell two attempts apart; the watcher run that queued the
-// work can. This is computed once, at dispatch, and then travels as an input so
-// that neither side has to re-derive it from a ledger another run may have
-// moved on. The character class keeps it safe to embed in an HTML marker.
-function assessmentAttemptKey({ runId, fingerprint }) {
-  const key = String(runId || `fingerprint-${fingerprint}`);
+// work can. The run attempt is part of the key because re-running a watcher
+// workflow preserves GITHUB_RUN_ID and only increments GITHUB_RUN_ATTEMPT, so
+// the run id alone would hand a re-run the previous attempt's identity. This is
+// computed once, at dispatch, and then travels as an input so that neither side
+// has to re-derive it from a ledger another run may have moved on -- an
+// assessor re-run keeps the id it was dispatched with. The character class
+// keeps it safe to embed in an HTML marker.
+function assessmentAttemptKey({ runId, runAttempt, fingerprint }) {
+  const run = String(runId || '').trim();
+  const attempt = String(runAttempt || '').trim();
+  const key = run ? (attempt ? `${run}.${attempt}` : run) : `fingerprint-${fingerprint}`;
   if (!/^[A-Za-z0-9._-]{1,96}$/.test(key)) throw new WatchError(`Unusable assessment attempt id: ${key}`);
   return key;
 }
@@ -751,7 +757,11 @@ async function runWatch({ github, context, core, env, root }) {
 
   if (!preview) {
     for (const item of selected) {
-      const attempt = assessmentAttemptKey({ runId: env.GITHUB_RUN_ID, fingerprint: item.fingerprint });
+      const attempt = assessmentAttemptKey({
+        runId: env.GITHUB_RUN_ID,
+        runAttempt: env.GITHUB_RUN_ATTEMPT,
+        fingerprint: item.fingerprint,
+      });
       if (item.reconcile) {
         await github.rest.issues.createComment({
           owner,

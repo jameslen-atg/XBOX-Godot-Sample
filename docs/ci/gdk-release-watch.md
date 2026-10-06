@@ -90,8 +90,11 @@ attempt out and re-queues the release behind never-attempted work. A dispatch
 that fails outright is recorded the same way before the error is re-raised, so a
 failed run is always visible in both the Actions log and the tracking issue.
 
-Each dispatch also carries an **attempt id** — the watcher run that queued it —
-as a workflow input. The assessor never re-derives that id from the ledger,
+Each dispatch also carries an **attempt id** — the watcher run *and run attempt*
+that queued it — as a workflow input. Both halves matter: re-running a watcher
+workflow preserves `GITHUB_RUN_ID` and only increments `GITHUB_RUN_ATTEMPT`, so
+a run-id-only key would hand the re-run the previous attempt's identity. The
+assessor never re-derives that id from the ledger,
 because an explicit retry re-queues the *same* evidence under a *new* watcher
 run: a slow assessor reading the ledger at publish time would otherwise adopt
 the retry's id and settle it with an older report. An assessor that finds a
