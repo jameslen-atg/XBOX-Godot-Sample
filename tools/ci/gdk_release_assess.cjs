@@ -165,6 +165,41 @@ function fenced(text) {
   return `${fence}\n${text}\n${fence}`;
 }
 
+const CONTEXT_TRUNCATION_TRAILER =
+  '\n> The evidence bundle was truncated here by the context builder.\n> Upstream text beyond this point was not shown.\n';
+
+// Returns the delimiter of the fence left open at the end of `markdown`, or
+// null. Only a line made entirely of backticks opens or closes a fence, and
+// `fenceFor` always picks a delimiter longer than any backtick run in the text
+// it wraps, so untrusted content can never close its own fence here.
+function openFenceAt(markdown) {
+  let open = null;
+  for (const line of String(markdown).split('\n')) {
+    const match = /^(`{3,})[ \t]*$/.exec(line);
+    if (!match) continue;
+    if (!open) open = match[1];
+    else if (match[1].length >= open.length) open = null;
+  }
+  return open;
+}
+
+// The composed context ends in fenced untrusted text, so a blind character cut
+// can land inside a fence and leave it open — the agent would then read upstream
+// prose as trusted instructions. Cut on a line boundary, close whatever fence
+// was open, and end on a trusted sentence saying the bundle was cut.
+function boundContext(markdown, max) {
+  const value = String(markdown || '');
+  if (value.length <= max) return { text: value, truncated: false };
+  const closingAllowance = fenceFor(value).length + 1;
+  const budget = Math.max(0, max - CONTEXT_TRUNCATION_TRAILER.length - closingAllowance);
+  const head = value.slice(0, budget);
+  const lastBreak = head.lastIndexOf('\n');
+  const onLineBoundary = lastBreak >= 0 ? head.slice(0, lastBreak + 1) : '';
+  const open = openFenceAt(onLineBoundary);
+  const closed = open ? `${onLineBoundary}${open}\n` : onLineBoundary;
+  return { text: `${closed}${CONTEXT_TRUNCATION_TRAILER}`, truncated: true };
+}
+
 function supportSnapshotSection(state) {
   return [
     '## Current support configuration (trusted repository data)',
@@ -223,7 +258,7 @@ function buildAssessmentContext({ release, baselineRelease, candidateBody, basel
     '',
   ].join('\n');
 
-  const bounded = truncate(markdown, limits.totalContextChars);
+  const bounded = boundContext(markdown, limits.totalContextChars);
   // Truncation is trusted evidence about what the agent could not see, so it is
   // recorded separately from the missing-baseline note: a missing baseline makes
   // the delta wider, not shorter, and must not read as "evidence was cut off".
@@ -954,6 +989,7 @@ module.exports = {
   WatchError,
   applyConsistencyRules,
   assertDispatchIsCurrent,
+  boundContext,
   buildAssessmentContext,
   classificationOfReport,
   findAssessmentForAttempt,

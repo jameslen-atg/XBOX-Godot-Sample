@@ -517,7 +517,11 @@ test('an attacker-controlled release title cannot escape the issue table or inje
     runUrl: 'https://example.test/run',
   });
   const row = body.split('\n').find((line) => line.startsWith('| Upstream release |'));
-  assert.equal(row, `| Upstream release | \`${release.name}\` |`);
+  // A pipe splits a GFM table cell even inside a code span, so the rendered row
+  // must carry the escaped form and still be exactly three cells wide.
+  assert.equal(row, `| Upstream release | \`${watch.tableCell(release.name)}\` |`);
+  assert.ok(row.includes('\\|'), 'the pipe in the title is escaped at the render site');
+  assert.equal(row.split(/(?<!\\)\|/).length - 1, 3, 'the row still has exactly the intended cell boundaries');
   assert.ok(body.includes(`| Release page | ${release.url} |`), 'the link is built from the API url, not the title');
 });
 

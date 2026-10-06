@@ -76,7 +76,8 @@ const SDK_ASSET_PATTERN = /^GDK_(\d{4})\.(\d{1,2})\.(\d{1,6})\.zip$/i;
 // rendered into Markdown tables and into the assessor's prompt. Collapse them to
 // a single bounded line so a crafted title cannot break out of a table row or
 // introduce a line that reads like an instruction to the agent. Backticks become
-// apostrophes so the result is always safe inside a code span.
+// apostrophes so the result is always safe inside a code span; pipes survive and
+// are escaped by `tableCell` at the one site that renders a table.
 const MAX_TITLE_CHARS = 200;
 
 function sanitizeReleaseTitle(raw) {
@@ -344,6 +345,12 @@ function isBotAuthored(entity, botLogin) {
   return Boolean(entity && entity.user && entity.user.login === botLogin);
 }
 
+// A pipe splits a GFM table cell even inside a code span, so the one cell that
+// carries free-form upstream text escapes it. GFM renders `\|` as a literal `|`.
+function tableCell(text) {
+  return String(text ?? '').replace(/\|/g, '\\|');
+}
+
 function renderTrackingIssueTitle(release) {
   return `GDK ${release.version} (${release.releaseLabel}): assess addon support`;
 }
@@ -359,7 +366,7 @@ function renderTrackingIssueBody({ release, baselineRelease, state, runUrl }) {
     '',
     '| Field | Value |',
     '| --- | --- |',
-    `| Upstream release | \`${release.name}\` |`,
+    `| Upstream release | \`${tableCell(release.name)}\` |`,
     `| Release page | ${release.url} |`,
     `| Tag | \`${release.tag}\` |`,
     `| Port version | \`${release.version}\` |`,
@@ -885,4 +892,5 @@ module.exports = {
   stateMarkerPrefix,
   statusOf,
   supportStatusFor,
+  tableCell,
 };
