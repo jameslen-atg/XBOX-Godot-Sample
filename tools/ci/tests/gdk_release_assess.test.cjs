@@ -441,18 +441,37 @@ test('renderAssessmentComment explains a downgrade and that no pull request was 
   const body = render({ agentOutputPath });
   assert.match(body, /\[!WARNING\]/);
   assert.match(body, /reported `tests_only`, which was downgraded to `needs_review`/);
-  assert.match(body, /No pull request was opened/);
+  assert.match(body, /No support change was proposed/);
   assert.match(body, /Classification:\*\* 🔍 Needs human review/);
 });
 
-test('renderAssessmentComment links a draft pull request when one was opened', (t) => {
+test('renderAssessmentComment carries the support change however it was handed off', (t) => {
   const dir = tempDir(t);
   const agentOutputPath = writeAgentOutput(dir, baseReport());
   const linked = render({ agentOutputPath, render: { pullRequestUrl: 'https://example.test/pull/7' } });
   assert.match(linked, /A draft pull request is open for local validation: https:\/\/example\.test\/pull\/7/);
 
+  // The repository does not allow Actions to open pull requests, so the normal
+  // path is the assignable task. It must survive into the comment verbatim.
+  const assigned = render({
+    agentOutputPath,
+    render: { proposal: { mode: 'issue', branch: 'automation/gdk-x', instructions: '**Goal:** add GDK 2604.2.7850' } },
+  });
+  assert.match(assigned, /assign this issue to complete it/i);
+  assert.match(assigned, /This automation cannot open pull requests in this repository/);
+  assert.match(assigned, /\*\*Goal:\*\* add GDK 2604\.2\.7850/);
+
+  const fellBack = render({
+    agentOutputPath,
+    render: { proposal: { mode: 'issue', instructions: 'task body', fallbackReason: 'Resource not accessible by integration' } },
+  });
+  assert.match(fellBack, /Opening the pull request automatically failed/);
+
+  const failed = render({ agentOutputPath, render: { proposalError: 'registry lookup failed' } });
+  assert.match(failed, /could not be derived: registry lookup failed/);
+
   const unlinked = render({ agentOutputPath });
-  assert.match(unlinked, /No draft pull request was opened for this report/);
+  assert.match(unlinked, /No support change was prepared for this report/);
 });
 
 // ---------------------------------------------------------------------------
@@ -625,7 +644,7 @@ test('publishAssessment opens a draft pull request only for a surviving tests_on
   assert.equal(calls.length, 0);
 });
 
-test('publishAssessment still posts the assessment when the support pull request fails', async (t) => {
+test('publishAssessment still posts the assessment when the support change fails', async (t) => {
   const args = publishArgs(t, {
     supportUpdate: async () => {
       throw new Error('branch protection rejected the push');
@@ -636,9 +655,30 @@ test('publishAssessment still posts the assessment when the support pull request
   assert.equal(result.posted, true);
   assert.equal(result.pullRequest, null);
   assert.equal(result.classification, 'tests_only');
-  assert.ok(args.core.warnings.some((message) => /could not be opened: branch protection rejected the push/.test(message)));
-  assert.match(args.github.state.created[1].body, /support pull request skipped: branch protection rejected the push/);
+  assert.ok(args.core.warnings.some((message) => /could not be prepared: branch protection rejected the push/.test(message)));
+  assert.match(args.github.state.created[0].body, /could not be derived: branch protection rejected the push/);
+  assert.match(args.github.state.created[1].body, /support change skipped: branch protection rejected the push/);
   assert.match(args.github.state.created[1].body, /"status": "tests-only"/);
+});
+
+test('publishAssessment posts the assignable task when no pull request was opened', async (t) => {
+  const args = publishArgs(t, {
+    supportUpdate: async () => ({
+      created: false,
+      mode: 'issue',
+      branch: 'automation/gdk-2604.2.7850-4242',
+      instructions: '**Goal:** add Microsoft GDK `2604.2.7850`',
+    }),
+  });
+  const result = await assess.publishAssessment(args);
+
+  assert.equal(result.posted, true);
+  assert.equal(result.pullRequest, null, 'issue mode never reports a pull request url');
+  assert.equal(result.proposalMode, 'issue');
+  assert.match(args.github.state.created[0].body, /assign this issue to complete it/i);
+  assert.match(args.github.state.created[0].body, /\*\*Goal:\*\* add Microsoft GDK `2604\.2\.7850`/);
+  assert.match(args.github.state.created[1].body, /"supportBranch": "automation\/gdk-2604\.2\.7850-4242"/);
+  assert.match(args.github.state.created[1].body, /"pullRequest": null/);
 });
 
 test('STATUS_FOR_CLASSIFICATION only produces statuses the watcher ledger understands', () => {

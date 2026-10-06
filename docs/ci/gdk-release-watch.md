@@ -3,12 +3,12 @@
 Microsoft publishes new GDK releases to [microsoft/GDK][gdk-releases] on its own
 cadence. This automation notices them, asks an AI agent what the release means
 for this repository, and files a tracking issue. When a release turns out to
-need nothing but revalidation, it also opens a **draft** pull request that adds
-the release to the supported lists, so a human only has to pull the branch down
-and run the tests locally.
+need nothing but revalidation, the issue also carries a complete, ready-to-apply
+task: the exact files, the exact values, and the local validation a human has to
+run. Assign that issue to GitHub Copilot and it produces the draft pull request.
 
 Nothing here merges anything, and nothing here edits addon source. The issue and
-the draft pull request are both proposals for a human.
+everything in it are proposals for a human.
 
 ## Why a schedule and not a release trigger
 
@@ -26,7 +26,7 @@ answer sooner.
 | `.github/workflows/gdk-release-assess.lock.yml` | Compiled workflow that Actions actually runs. Generated; never hand-edit. |
 | `tools/ci/gdk_release_watch.cjs` | Deterministic discovery: release parsing, edition math, support state, backlog selection, the evidence fingerprint, and the tracking-issue ledger. |
 | `tools/ci/gdk_release_assess.cjs` | Deterministic assessment half: evidence bundle, report validation, consistency rules, rendering, and publishing. |
-| `tools/ci/gdk_support_update.cjs` | Deterministic support-list updater: vcpkg registry lookup, bounded config edits, and the draft pull request. |
+| `tools/ci/gdk_support_update.cjs` | Deterministic support-list updater: vcpkg registry lookup, bounded config edits, and the assignable task body (or, if ever enabled, the draft pull request). |
 | `tools/ci/tests/gdk_*.test.cjs` | `node:test` suites for all three helpers. |
 | `.github/workflows/gdk-release-checks.yml` | PR/push checks: helper tests and lock-file drift. |
 
@@ -94,19 +94,27 @@ the CMake/vcpkg wiring, and the packaging tooling, and returns one of:
 | Classification | Meaning | Result |
 | -------------- | ------- | ------ |
 | `changes_required` | A concrete call site, build setting, or packaging flow has to change. Every required change cites a real file and line range. | Assessment comment on the tracking issue. |
-| `tests_only` | Nothing in this repository needs to change; the release only needs to be added to the supported lists and validated. | Assessment comment **plus** a draft pull request. |
+| `tests_only` | Nothing in this repository needs to change; the release only needs to be added to the supported lists and validated. | Assessment comment **plus** a ready-to-apply support task. |
 | `needs_review` | The notes are ambiguous or the evidence is incomplete. | Assessment comment asking for a human read. |
 
-`tests_only` is the only verdict that can open a pull request, so it carries the
-strictest bar. A report claiming `tests_only` is downgraded to `needs_review`
-unless it has `high` confidence, zero required changes, zero evidence gaps, at
-least three reviewed areas, and at least one validation task. The downgrade and
-its reason are shown in the comment — a model cannot talk its way past it.
+`tests_only` is the only verdict that proposes a support change, so it carries
+the strictest bar. A report claiming `tests_only` is downgraded to
+`needs_review` unless it has `high` confidence, zero required changes, zero
+evidence gaps, at least three reviewed areas, and at least one validation task.
+The downgrade and its reason are shown in the comment — a model cannot talk its
+way past it.
 
-## The draft pull request
+## The support change
 
-For a `tests_only` verdict, the publisher opens a draft pull request on
-`automation/gdk-<version>-<id>` that edits **only** these files:
+This repository does not allow GitHub Actions to create pull requests, so the
+automation does not try. For a `tests_only` verdict it derives the change
+deterministically and renders it into the assessment comment under
+**Proposed support change — assign this issue to complete it**. Assign the
+tracking issue to GitHub Copilot (or do it by hand) and the task body is the
+whole brief: it is written to stand alone, because the coding agent may see
+nothing but the issue.
+
+The derived change edits **only** these files:
 
 - `cmake/GDKDependencies.cmake` — adds the edition to `GDK_SUPPORTED_VERSIONS`.
 - `.github/gdk-versions.json` — adds the hosted vcpkg entry, when the port
@@ -115,31 +123,44 @@ For a `tests_only` verdict, the publisher opens a draft pull request on
   needed to resolve the port.
 - `vcpkg.json` — only if the manifest needs the new version.
 
-If the public vcpkg registry has no `ms-gdk` port for the release yet, the pull
-request covers the installed-GDK path only and says so. Commits are written
-through the Git Data API, so the checkout needs no credentials; the branch is
-never force-pushed, and a commit that would be empty is an error rather than a
-no-op.
+Each file is listed with its current value and its required value, so a stale
+"current" value is a visible signal that main has moved and the change must be
+re-derived rather than forced in. If the public vcpkg registry has no `ms-gdk`
+port for the release yet, the task covers the installed-GDK path only and says
+so.
 
-The pull request body is rendered from `.github/PULL_REQUEST_TEMPLATE.md`, links
-the tracking issue and the assessment comment, and lists the exact local
-validation commands for the edition — which differ between the installed-GDK and
-hosted-vcpkg paths. **The automation never runs those commands.** Reviewing the
-pull request means pulling the branch and running them.
+The task also tells the agent, in as many words, that it **cannot** validate the
+change — building needs Windows and an installed GDK — and that it must open the
+pull request as a draft that honestly records validation as not yet run. The
+exact local validation commands for the edition are included verbatim; they
+differ between the installed-GDK and hosted-vcpkg paths. **Nothing in this
+automation ever runs them.**
 
 ## Posting and staged mode
 
 `GDK_ASSESS_MODE` in the publisher step of `gdk-release-assess.md` controls
-writes. `post` (the default) comments on the tracking issue and opens the draft
-pull request. Set it to `staged` to render the assessment to the job summary and
-write nothing. The watcher's equivalent is the `preview` dispatch input.
+writes. `post` (the default) comments on the tracking issue. Set it to `staged`
+to render the assessment to the job summary and write nothing. The watcher's
+equivalent is the `preview` dispatch input.
 
-Opening a pull request with the built-in `GITHUB_TOKEN` requires **Allow GitHub
-Actions to create and approve pull requests** in the repository's Actions
-settings. Leave it off and the assessment still posts, with a note that the
-pull request could not be opened. Do not add a personal access token or a GitHub
-App to work around it: the draft pull request exists to be reviewed by a human,
-and a token with more authority does not change that.
+`GDK_SUPPORT_PROPOSAL_MODE` controls how the support change is handed off:
+
+| Value | Behaviour |
+| ----- | --------- |
+| `issue` (default) | Render the change as an assignable task in the assessment comment. No branch, no pull request, no write beyond the comment. |
+| `pull-request` | Push `automation/gdk-<version>-<id>` and open a draft pull request. |
+
+`pull-request` additionally needs `contents: write` and `pull-requests: write`
+restored on the `post-gdk-assessment` job **and** **Allow GitHub Actions to
+create and approve pull requests** enabled in the repository's Actions settings.
+Flip both or neither; the job is deliberately shipped with neither. If the mode
+is on but a permission is missing, the publisher detects the permission error,
+falls back to the assignable task, and still posts the assessment rather than
+losing it.
+
+Do not add a personal access token or a GitHub App to work around the setting.
+The change exists to be reviewed by a human, and a token with more authority
+does not change that.
 
 ## Changing the supported floor
 

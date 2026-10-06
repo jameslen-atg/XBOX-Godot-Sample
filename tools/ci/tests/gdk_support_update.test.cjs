@@ -628,7 +628,7 @@ function fakeWorldGithub({ registry, repoSources, pulls = [] }) {
   };
 }
 
-test('openSupportProposal turns a tests-only verdict into a draft pull request', async () => {
+test('openSupportProposal opens a draft pull request when that mode is explicitly enabled', async () => {
   const github = fakeWorldGithub({
     registry: fakeRegistry({ commits: registryCommits() }),
     repoSources: parsedSources(),
@@ -638,7 +638,7 @@ test('openSupportProposal turns a tests-only verdict into a draft pull request',
     github,
     core,
     context: { repo: { owner: OWNER, repo: REPO } },
-    env: {},
+    env: { GDK_SUPPORT_PROPOSAL_MODE: 'pull-request' },
     release: RELEASE,
     issueNumber: 321,
     sha: BASE_SHA,
@@ -673,7 +673,7 @@ test('openSupportProposal falls back to an installed-only proposal when vcpkg ha
     github,
     core: fakeCore(),
     context: { repo: { owner: OWNER, repo: REPO } },
-    env: { GDK_SUPPORT_BASE_BRANCH: 'public/main' },
+    env: { GDK_SUPPORT_BASE_BRANCH: 'public/main', GDK_SUPPORT_PROPOSAL_MODE: 'pull-request' },
     release: RELEASE,
     issueNumber: 321,
     sha: BASE_SHA,
@@ -688,6 +688,100 @@ test('openSupportProposal falls back to an installed-only proposal when vcpkg ha
   assert.match(pull.body, /not published to the public vcpkg registry/);
   assert.match(pull.body, /cmake --preset installed-gdk -DGDK_VERSION=260402/);
   assert.ok(!pull.body.includes('[assessment report]'), 'no report link is rendered before the report exists');
+});
+
+test('openSupportProposal defaults to an assignable task and writes nothing', async () => {
+  const github = fakeWorldGithub({
+    registry: fakeRegistry({ commits: registryCommits() }),
+    repoSources: parsedSources(),
+  });
+  const result = await support.openSupportProposal({
+    github,
+    core: fakeCore(),
+    context: { repo: { owner: OWNER, repo: REPO } },
+    env: {},
+    release: RELEASE,
+    issueNumber: 321,
+    sha: BASE_SHA,
+    runUrl: 'https://example.test/run',
+    assessmentUrl: 'https://example.test/comment/1',
+  });
+
+  assert.equal(result.mode, 'issue');
+  assert.equal(result.created, false);
+  assert.equal(result.branch, 'automation/gdk-2604.2.7850-4242');
+  assert.equal(github.state.trees.length, 0, 'issue mode must not push a branch');
+  assert.equal(github.state.createdPulls.length, 0, 'issue mode must not open a pull request');
+
+  // The task body is the entire handoff, so every file the plan touches has to
+  // be spelled out with the value to write.
+  assert.match(result.instructions, /edition `260402`/);
+  assert.match(result.instructions, /`cmake\/GDKDependencies\.cmake`/);
+  assert.match(result.instructions, /`\.github\/gdk-versions\.json`/);
+  assert.match(result.instructions, /`vcpkg-configuration\.json`/);
+  assert.match(result.instructions, /251001;251002;260400;260401;260402/);
+  assert.match(result.instructions, /automation\/gdk-2604\.2\.7850-4242/);
+  assert.match(result.instructions, /draft/i);
+  assert.match(result.instructions, /You cannot complete the validation for this task/);
+  assert.match(result.instructions, /Base the work on `main`/);
+  assert.ok(!result.instructions.includes('.github/PULL_REQUEST_TEMPLATE.md\n- `'), 'the template is not an editable file');
+});
+
+test('openSupportProposal degrades to an assignable task when Actions may not open pull requests', async () => {
+  const github = fakeWorldGithub({
+    registry: fakeRegistry({ commits: registryCommits() }),
+    repoSources: parsedSources(),
+  });
+  github.rest.pulls.create = async () => {
+    throw new Error('GitHub Actions is not permitted to create or approve pull requests');
+  };
+  const core = fakeCore();
+  const result = await support.openSupportProposal({
+    github,
+    core,
+    context: { repo: { owner: OWNER, repo: REPO } },
+    env: { GDK_SUPPORT_PROPOSAL_MODE: 'pull-request' },
+    release: RELEASE,
+    issueNumber: 321,
+    sha: BASE_SHA,
+    runUrl: 'https://example.test/run',
+    assessmentUrl: null,
+  });
+
+  assert.equal(result.created, false);
+  assert.equal(result.mode, 'issue');
+  assert.match(result.fallbackReason, /not permitted to create or approve pull requests/);
+  assert.match(result.instructions, /Required edits/);
+  assert.ok(core.warnings.some((message) => /Falling back to an assignable task/.test(message)));
+});
+
+test('openSupportProposal never hides an unrelated pull request failure', async () => {
+  const github = fakeWorldGithub({
+    registry: fakeRegistry({ commits: registryCommits() }),
+    repoSources: parsedSources(),
+  });
+  github.rest.pulls.create = async () => {
+    throw new Error('Validation Failed: head sha is missing');
+  };
+  await assert.rejects(
+    support.openSupportProposal({
+      github,
+      core: fakeCore(),
+      context: { repo: { owner: OWNER, repo: REPO } },
+      env: { GDK_SUPPORT_PROPOSAL_MODE: 'pull-request' },
+      release: RELEASE,
+      issueNumber: 321,
+      sha: BASE_SHA,
+      runUrl: 'https://example.test/run',
+    }),
+    /head sha is missing/,
+  );
+});
+
+test('resolveSupportMode defaults to issue and rejects anything it does not implement', () => {
+  assert.equal(support.resolveSupportMode({}), 'issue');
+  assert.equal(support.resolveSupportMode({ GDK_SUPPORT_PROPOSAL_MODE: ' Pull-Request ' }), 'pull-request');
+  assert.throws(() => support.resolveSupportMode({ GDK_SUPPORT_PROPOSAL_MODE: 'auto' }), /GDK_SUPPORT_PROPOSAL_MODE/);
 });
 
 test('parseSupportSources reads the pinned baseline and the hosted versions it must keep', () => {

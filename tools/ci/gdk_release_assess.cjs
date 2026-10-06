@@ -480,6 +480,8 @@ function renderAssessmentComment({
   sha,
   runUrl,
   pullRequestUrl,
+  proposal,
+  proposalError,
 }) {
   const lines = [
     `<!-- xbox-godot-gdk-release-assessment id=${release.id} sha=${sha} -->`,
@@ -500,7 +502,7 @@ function renderAssessmentComment({
     lines.push(
       '> [!WARNING]',
       `> The assessor reported \`${original}\`, which was downgraded to \`needs_review\` because`,
-      `> ${escapeMarkdown(downgradeReason).replace(/\n/g, ' ')}. No pull request was opened.`,
+      `> ${escapeMarkdown(downgradeReason).replace(/\n/g, ' ')}. No support change was proposed.`,
       '',
     );
   }
@@ -561,12 +563,33 @@ function renderAssessmentComment({
   }
 
   if (pullRequestUrl) {
-    lines.push(`### Proposed support change`, '', `A draft pull request is open for local validation: ${pullRequestUrl}`, '');
+    lines.push('### Proposed support change', '', `A draft pull request is open for local validation: ${pullRequestUrl}`, '');
+  } else if (proposal && proposal.instructions) {
+    // The automation is not permitted to open pull requests here, so the whole
+    // change has to travel as a task description. Assign this issue to Copilot
+    // (or do it by hand) and the section below is the complete brief.
+    lines.push(
+      '### Proposed support change — assign this issue to complete it',
+      '',
+      proposal.fallbackReason
+        ? `Opening the pull request automatically failed (\`${escapeMarkdown(proposal.fallbackReason).replace(/\n/g, ' ')}\`), so the change is described below instead.`
+        : 'This automation cannot open pull requests in this repository, so the change is described below instead.',
+      '',
+      proposal.instructions,
+      '',
+    );
+  } else if (proposalError) {
+    lines.push(
+      '### Proposed support change',
+      '',
+      `The support change could not be derived: ${escapeMarkdown(proposalError).replace(/\n/g, ' ')}`,
+      '',
+    );
   } else if (report.classification === 'tests_only') {
     lines.push(
       '### Proposed support change',
       '',
-      'No draft pull request was opened for this report; see the watcher state comment for the reason.',
+      'No support change was prepared for this report; see the watcher state comment for the reason.',
       '',
     );
   }
@@ -677,16 +700,16 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
   }
   assertDispatchIsCurrent({ comments, releaseId: inputs.releaseId, fingerprint: inputs.fingerprint, botLogin });
 
-  let pullRequest = null;
-  let pullRequestNote = null;
+  let proposal = null;
+  let proposalNote = null;
   if (validated.report.classification === 'tests_only' && typeof supportUpdate === 'function') {
     try {
-      pullRequest = await supportUpdate({ release: prepared.release, issueNumber: inputs.issueNumber, sha, runUrl });
+      proposal = await supportUpdate({ release: prepared.release, issueNumber: inputs.issueNumber, sha, runUrl });
     } catch (error) {
       // A failed proposal must not swallow the assessment: post the report, and
-      // record why no draft pull request accompanies it.
-      pullRequestNote = error.message;
-      core.warning(`The support pull request could not be opened: ${error.message}`);
+      // record why no support change accompanies it.
+      proposalNote = error.message;
+      core.warning(`The support change could not be prepared: ${error.message}`);
     }
   }
 
@@ -699,7 +722,9 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     repo,
     sha,
     runUrl,
-    pullRequestUrl: pullRequest ? pullRequest.url : null,
+    pullRequestUrl: proposal ? proposal.url || null : null,
+    proposal,
+    proposalError: proposalNote,
   });
   const { data: comment } = await github.rest.issues.createComment({
     owner,
@@ -721,8 +746,9 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
         runId: env.GITHUB_RUN_ID || null,
         runUrl,
         assessmentUrl: comment.html_url,
-        pullRequest: pullRequest ? pullRequest.url : null,
-        note: pullRequestNote ? `support pull request skipped: ${pullRequestNote}` : null,
+        pullRequest: proposal ? proposal.url || null : null,
+        supportBranch: proposal ? proposal.branch || null : null,
+        note: proposalNote ? `support change skipped: ${proposalNote}` : null,
         at: new Date().toISOString(),
       },
     }),
@@ -732,7 +758,8 @@ async function publishAssessment({ github, context, core, env, root, agentOutput
     posted: true,
     url: comment.html_url,
     classification: validated.report.classification,
-    pullRequest: pullRequest ? pullRequest.url : null,
+    pullRequest: proposal ? proposal.url || null : null,
+    proposalMode: proposal ? proposal.mode || null : null,
     body,
   };
 }

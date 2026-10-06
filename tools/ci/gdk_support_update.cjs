@@ -34,6 +34,33 @@ const LIMITS = Object.freeze({
   maxRegistryFileBytes: 8 * 1024 * 1024,
 });
 
+// How a `tests_only` verdict is handed off.
+//
+// `issue` renders the change as an assignable task on the tracking issue and
+// writes nothing. `pull-request` pushes a branch and opens the draft directly,
+// which requires the repository setting "Allow GitHub Actions to create and
+// approve pull requests". That setting is organisation-controlled and cannot be
+// enabled here, so `issue` is the default: the handoff has to work with the
+// permissions we actually have, not the ones we would prefer.
+const SUPPORT_MODES = Object.freeze(['issue', 'pull-request']);
+const DEFAULT_SUPPORT_MODE = 'issue';
+
+// GitHub refuses Actions-authored pull requests with a 403 whose message names
+// the setting; a safe job without `pull-requests: write` fails with the generic
+// "Resource not accessible by integration". Both are recognised so an opt-in
+// `pull-request` run degrades to the assignable task instead of losing the
+// assessment entirely.
+const PR_PERMISSION_PATTERN =
+  /not permitted to create or approve pull requests|GitHub Actions is not permitted|Resource not accessible by integration/i;
+
+function resolveSupportMode(env) {
+  const raw = String((env && env.GDK_SUPPORT_PROPOSAL_MODE) || DEFAULT_SUPPORT_MODE).trim().toLowerCase();
+  if (!SUPPORT_MODES.includes(raw)) {
+    throw new WatchError(`GDK_SUPPORT_PROPOSAL_MODE must be one of ${SUPPORT_MODES.join(', ')}; got ${JSON.stringify(raw)}.`);
+  }
+  return raw;
+}
+
 const TEMPLATE_HEADINGS = Object.freeze([
   'Summary',
   'Public API changes',
@@ -190,7 +217,7 @@ function updateSupportedEditions(text, edition) {
   for (const existing of current) {
     if (!next.includes(existing)) throw new WatchError('Refusing an edit that would drop an existing supported edition.');
   }
-  return { text: text.replace(pattern, `$1${next.join(';')}$3`), changed: true, value: next };
+  return { text: text.replace(pattern, `$1${next.join(';')}$3`), changed: true, value: next, from: current };
 }
 
 // Preserves the existing two-space JSON layout and the `_comment` keys, and
@@ -300,11 +327,20 @@ function planSupportUpdate({ release, sources: rawSources, registry }) {
 
   const files = [];
   const notes = [];
+  const directives = [];
 
   const cmake = updateSupportedEditions(sources['cmake/GDKDependencies.cmake'], release.edition);
   if (cmake.changed) {
     files.push({ path: 'cmake/GDKDependencies.cmake', content: cmake.text });
     notes.push(`Adds edition \`${release.edition}\` to \`GDK_SUPPORTED_VERSIONS\` (now \`${cmake.value.join(';')}\`).`);
+    directives.push({
+      path: 'cmake/GDKDependencies.cmake',
+      change:
+        `Add \`${release.edition}\` to the \`set(GDK_SUPPORTED_VERSIONS "...")\` list, keeping it numerically ` +
+        'sorted and keeping every edition already there. That single line is the only change in this file.',
+      from: cmake.from.join(';'),
+      to: cmake.value.join(';'),
+    });
   } else {
     notes.push(`Edition \`${release.edition}\` is already in \`GDK_SUPPORTED_VERSIONS\`.`);
   }
@@ -313,9 +349,10 @@ function planSupportUpdate({ release, sources: rawSources, registry }) {
   let defaultChanged = false;
   if (registry && registry.available) {
     const hostedJson = JSON.parse(sources['.github/gdk-versions.json']);
+    const releaseField = release.releaseLabel.replace(/ Update \d+$/, '');
     const hosted = updateHostedMatrix(
       hostedJson,
-      { version: release.version, edition: release.edition, release: release.releaseLabel.replace(/ Update \d+$/, '') },
+      { version: release.version, edition: release.edition, release: releaseField },
       { advanceDefault: true },
     );
     hostedChanged = hosted.changed;
@@ -323,6 +360,16 @@ function planSupportUpdate({ release, sources: rawSources, registry }) {
     if (hosted.changed) {
       files.push({ path: '.github/gdk-versions.json', content: stringifyHostedMatrix(hosted.json) });
       notes.push(`Adds \`${release.version}\` to the hosted CI matrix${hosted.defaultChanged ? ` and advances \`default\` to \`${release.version}\`` : ''}.`);
+      directives.push({
+        path: '.github/gdk-versions.json',
+        change:
+          `Add \`{ "version": "${release.version}", "edition": "${release.edition}", "release": "${releaseField}" }\` ` +
+          'to `supported`, sorted newest edition first, on one line like the entries already there. Keep every ' +
+          'existing entry and the `_comment` keys.' +
+          (hosted.defaultChanged ? ' Then advance `default` as shown below.' : ' Leave `default` alone.'),
+        from: hosted.defaultChanged ? `"default": ${JSON.stringify(hostedJson.default)}` : null,
+        to: hosted.defaultChanged ? `"default": ${JSON.stringify(release.version)}` : null,
+      });
     }
 
     if (registry.baselineChange) {
@@ -333,6 +380,14 @@ function planSupportUpdate({ release, sources: rawSources, registry }) {
           `Advances the vcpkg registry baseline from \`${registry.baselineChange.from}\` to \`${registry.baselineChange.to}\`, ` +
             'the earliest public-registry commit that publishes this port version.',
         );
+        directives.push({
+          path: 'vcpkg-configuration.json',
+          change:
+            'Repoint the default-registry `baseline` to the commit below — the earliest public `microsoft/vcpkg` ' +
+            'commit that publishes this port version. Do not use registry HEAD, and change nothing else in the file.',
+          from: registry.baselineChange.from,
+          to: registry.baselineChange.to,
+        });
       }
     }
 
@@ -345,6 +400,16 @@ function planSupportUpdate({ release, sources: rawSources, registry }) {
         notes.push(
           `Pins \`ms-gdk\` to \`${proposedDefault}\` via a manifest override, because the selected registry baseline resolves \`${resolved}\` on its own.`,
         );
+        directives.push({
+          path: 'vcpkg.json',
+          change: manifest.from
+            ? 'Update the existing `ms-gdk` entry under `overrides` to the version below. Leave every other override alone.'
+            : 'Add an `overrides` array pinning `ms-gdk` to the version below, immediately above the top-level ' +
+              '`"features"` block. Preserve the existing hand-formatted inline arrays elsewhere in the manifest.',
+          why: `the selected registry baseline resolves \`${resolved}\` on its own, which is not the proposed default`,
+          from: manifest.from,
+          to: proposedDefault,
+        });
       }
     }
   } else {
@@ -361,6 +426,7 @@ function planSupportUpdate({ release, sources: rawSources, registry }) {
   return {
     files,
     notes,
+    directives,
     kind: registry && registry.available ? 'vcpkg' : 'installed',
     hostedChanged,
     defaultChanged,
@@ -544,6 +610,93 @@ function renderPullRequestBody({ template, release, plan, issueNumber, assessmen
 }
 
 // ---------------------------------------------------------------------------
+// Assignable task body
+// ---------------------------------------------------------------------------
+
+function renderDirective(directive, index) {
+  const lines = [`#### ${index + 1}. \`${directive.path}\``, '', directive.change];
+  if (directive.why) lines.push('', `This is needed because ${directive.why}.`);
+  if (directive.from !== null && directive.from !== undefined) {
+    lines.push('', '| | Value |', '| --- | --- |', `| Current | \`${directive.from}\` |`, `| Required | \`${directive.to}\` |`);
+  } else if (directive.to !== null && directive.to !== undefined) {
+    lines.push('', `Required value: \`${directive.to}\``);
+  }
+  return lines;
+}
+
+// The handoff used when this automation cannot open the pull request itself.
+//
+// Everything a coding agent needs has to be in this one body: the exact edits,
+// the hard scope limit, and — most importantly — the fact that the agent cannot
+// validate the result. Adding an edition to a list is trivial; the real work is
+// building against the SDK on Windows, which no hosted agent can do. An agent
+// that reads this and reports "validated" has failed the task.
+function renderAssignmentBody({ release, plan, branch, issueNumber, assessmentUrl, analyzedSha, runUrl, baseBranch = 'main' }) {
+  const commands = validationCommands({ plan, release });
+  const lines = [
+    `**Goal:** add Microsoft GDK \`${release.version}\` (edition \`${release.edition}\`) to this repository's`,
+    'supported-version lists, and open a **draft** pull request so a maintainer can validate it locally.',
+    '',
+    '> [!IMPORTANT]',
+    '> **You cannot complete the validation for this task, and you must not claim that you did.**',
+    `> Proving support requires building this repository on Windows against an installed GDK \`${release.edition}\``,
+    '> or the vcpkg port, which no hosted agent can do. Your job is to produce the configuration diff and a',
+    '> draft pull request that honestly records the validation as *not yet run*. A maintainer runs it.',
+    '',
+    '### Scope',
+    '',
+    'Change **only** these files. Anything else — addon source, `.gd` scripts, docs, samples, tests — is out of',
+    'scope: the assessment concluded no source change is required, so touching source would contradict it.',
+    '',
+    ...SOURCE_PATHS.filter((p) => p !== PR_TEMPLATE_PATH).map((p) => `- \`${p}\``),
+    '',
+    `Base the work on \`${baseBranch}\`. Suggested branch name: \`${branch}\`.`,
+    '',
+    '### Required edits',
+    '',
+    `Derived deterministically from the release identity and the repository state at \`${analyzedSha.slice(0, 12)}\`.`,
+    'If any "Current" value below no longer matches the file, main has moved — re-derive the change rather than',
+    'forcing these values in, and say so in the pull request.',
+    '',
+    ...plan.directives.flatMap((directive, index) => [...renderDirective(directive, index), '']),
+    '### Pull request',
+    '',
+    `- Open it as a **draft** against \`${baseBranch}\`.`,
+    `- Title: \`build(gdk): propose support for GDK ${release.version} (edition ${release.edition})\``,
+    `- Link it to #${issueNumber}.`,
+    '- Fill in `.github/PULL_REQUEST_TEMPLATE.md` keeping every heading, HTML comment and checklist item.',
+    '- Under **Public API changes**, write `None` — this is a build-configuration change only.',
+    '- Under **Validation run**, state plainly that nothing has been run yet and paste the command list below',
+    '  for the maintainer. Do not tick a validation box and do not invent results.',
+    '',
+    '### Validation the maintainer must run',
+    '',
+    plan.kind === 'vcpkg'
+      ? 'This change moves the vcpkg configuration, so the standard orchestrator exercises the new SDK:'
+      : `This release has no public vcpkg port, so it must be validated against an installed GDK \`${release.edition}\` in a fresh checkout:`,
+    '',
+    '```powershell',
+    ...commands,
+    '```',
+    '',
+    plan.kind === 'vcpkg'
+      ? `A successful configure is not proof. The resolved dependency must really be \`ms-gdk ${release.version}\` — check the vcpkg install log and the \`_GRDK_EDITION\` value in the resolved \`grdk.h\`.`
+      : '`tools\\run_all_tests.ps1` always builds and tests the default `build\\` tree, so the build and doctest stages are run explicitly against `build\\installed-gdk\\` and then skipped in the orchestrator. Otherwise the orchestrator would silently re-validate the vcpkg SDK instead.',
+    '',
+    '### Done when',
+    '',
+    '- [ ] The listed files carry exactly the edits above, and no other file is modified.',
+    '- [ ] Existing supported editions and hosted matrix entries are all still present.',
+    '- [ ] `node --test tools/ci/tests/pr_gate_scope.test.cjs` passes (the GDK lists feed gate routing).',
+    '- [ ] A draft pull request is open, linked to this issue, with the template intact.',
+    '- [ ] The pull request states that local validation has **not** been run.',
+    '',
+    `<sub>Assessment: ${assessmentUrl || 'see the report on this issue'} · Derived from \`${analyzedSha}\` · [watcher run](${runUrl})</sub>`,
+  ];
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // Branch and draft pull request
 // ---------------------------------------------------------------------------
 
@@ -658,11 +811,14 @@ async function createSupportPullRequest({ github, core, owner, repo, release, pl
 // Entry point
 // ---------------------------------------------------------------------------
 
-// Everything a tests-only assessment needs to turn into a draft pull request.
+// Everything a tests-only assessment needs to become a support change.
+//
 // Sources are read from the analyzed commit through the API rather than the
-// checkout so a CRLF-normalised working tree can never leak into the commit.
+// checkout so a CRLF-normalised working tree can never leak into the commit —
+// and so `issue` mode can produce an accurate diff without a checkout at all.
 async function openSupportProposal({ github, core, context, env, release, issueNumber, sha, runUrl, assessmentUrl }) {
   const { owner, repo } = context.repo;
+  const mode = resolveSupportMode(env);
   const baseBranch = env.GDK_SUPPORT_BASE_BRANCH || 'main';
   const sources = await readSourcesAtCommit({ github, owner, repo, ref: sha, paths: SOURCE_PATHS });
   const state = parseSupportSources(sources);
@@ -675,6 +831,16 @@ async function openSupportProposal({ github, core, context, env, release, issueN
     requiredVersions: state.hostedVersions,
   });
   const plan = planSupportUpdate({ release, sources, registry });
+  const branch = branchNameFor(release);
+
+  const assignment = () =>
+    renderAssignmentBody({ release, plan, branch, issueNumber, assessmentUrl, analyzedSha: sha, runUrl, baseBranch });
+
+  if (mode === 'issue') {
+    core.notice(`Rendered an assignable support task for GDK ${release.version}; no branch or pull request was created.`);
+    return { created: false, mode, branch, plan, baseBranch, instructions: assignment() };
+  }
+
   const body = renderPullRequestBody({
     template: sources[PR_TEMPLATE_PATH],
     release,
@@ -685,18 +851,36 @@ async function openSupportProposal({ github, core, context, env, release, issueN
     runUrl,
   });
 
-  return createSupportPullRequest({
-    github,
-    core,
-    owner,
-    repo,
-    release,
-    plan,
-    baseSha: sha,
-    baseBranch,
-    body,
-    issueNumber,
-  });
+  try {
+    const pull = await createSupportPullRequest({
+      github,
+      core,
+      owner,
+      repo,
+      release,
+      plan,
+      baseSha: sha,
+      baseBranch,
+      body,
+      issueNumber,
+    });
+    return { ...pull, mode, plan, baseBranch };
+  } catch (error) {
+    // The repository setting that allows Actions to open pull requests is not
+    // always ours to turn on. Losing a valid assessment to a permissions error
+    // would be the worst outcome, so fall back to the assignable task.
+    if (!PR_PERMISSION_PATTERN.test(String(error && error.message))) throw error;
+    core.warning(`Falling back to an assignable task: ${error.message}`);
+    return {
+      created: false,
+      mode: 'issue',
+      branch,
+      plan,
+      baseBranch,
+      instructions: assignment(),
+      fallbackReason: String(error.message),
+    };
+  }
 }
 
 function parseSupportSources(sources) {
@@ -710,10 +894,12 @@ function parseSupportSources(sources) {
 }
 
 module.exports = {
+  DEFAULT_SUPPORT_MODE,
   LIMITS,
   MS_GDK_VERSIONS_PATH,
   PR_TEMPLATE_PATH,
   SOURCE_PATHS,
+  SUPPORT_MODES,
   TEMPLATE_HEADINGS,
   VCPKG_BASELINE_PATH,
   VCPKG_OWNER,
@@ -734,8 +920,10 @@ module.exports = {
   portVersionsIn,
   pushSupportBranch,
   readSourcesAtCommit,
+  renderAssignmentBody,
   renderPullRequestBody,
   resolveRegistryCandidate,
+  resolveSupportMode,
   splitTemplate,
   stringifyHostedMatrix,
   tickChecklist,

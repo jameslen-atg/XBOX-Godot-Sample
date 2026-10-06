@@ -104,9 +104,8 @@ safe-outputs:
         instructions.
       if: (!cancelled()) && needs.agent.result == 'success' && needs.detection.outputs.detection_success == 'true'
       permissions:
-        contents: write
+        contents: read
         issues: write
-        pull-requests: write
       inputs:
         report:
           description: The assessment report as a JSON string.
@@ -126,10 +125,15 @@ safe-outputs:
         - name: Publish assessment
           uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
           env:
-            # `post` comments on the tracking issue and, for a `tests_only`
-            # verdict, opens the draft support pull request. Set to `staged` to
-            # render to the job summary only (docs/ci/gdk-release-watch.md).
+            # `post` comments on the tracking issue. Set to `staged` to render
+            # to the job summary only (docs/ci/gdk-release-watch.md).
             GDK_ASSESS_MODE: post
+            # `issue` writes the support-list change onto the tracking issue as
+            # an assignable task. `pull-request` would open the draft directly,
+            # but that needs the repository setting "Allow GitHub Actions to
+            # create and approve pull requests" plus `contents: write` and
+            # `pull-requests: write` restored above. Flip both or neither.
+            GDK_SUPPORT_PROPOSAL_MODE: issue
             GDK_ASSESS_INPUTS: ${{ toJSON(inputs) }}
             GDK_ASSESS_CONTEXT_PATH: ${{ runner.temp }}/gdk-release-assess-context/context.json
           with:
@@ -199,10 +203,10 @@ repository — mention them under optional improvements if they are worth doing.
   needed. Every required change must cite a real file and line range.
 - `tests_only` — nothing in this repository needs to change; the release only
   needs to be added to the supported lists and validated locally. This verdict
-  can open a draft pull request, so it carries the highest bar: `high`
-  confidence, zero required changes, zero evidence gaps, at least three reviewed
-  areas, and at least one validation task. If you cannot meet all of those, use
-  `needs_review`.
+  can turn into a ready-to-apply support change, so it carries the highest bar:
+  `high` confidence, zero required changes, zero evidence gaps, at least three
+  reviewed areas, and at least one validation task. If you cannot meet all of
+  those, use `needs_review`.
 - `needs_review` — the notes are ambiguous, the evidence is incomplete, or you
   cannot rule out an impact. This is the correct answer when you are unsure.
 
