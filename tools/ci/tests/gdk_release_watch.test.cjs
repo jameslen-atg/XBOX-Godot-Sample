@@ -25,10 +25,16 @@ function makeSupportFixture({
     { version: '2510.1.6224', edition: '251001', release: 'October 2025 Update 1' },
   ],
   baseline = '0'.repeat(40),
+  sources = {},
 } = {}) {
   const root = tempDir();
   fs.mkdirSync(path.join(root, 'cmake'), { recursive: true });
   fs.mkdirSync(path.join(root, '.github'), { recursive: true });
+  for (const [relative, text] of Object.entries(sources)) {
+    const file = path.join(root, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+  }
   fs.writeFileSync(
     path.join(root, 'cmake', 'GDKDependencies.cmake'),
     `# fixture\nset(GDK_SUPPORTED_VERSIONS "${editions.join(';')}"\n    CACHE STRING "Supported editions")\n`,
@@ -411,6 +417,51 @@ test('computeEvidenceFingerprint tracks the baseline notes the delta is computed
     withBaseline('baseline notes'),
     watch.computeEvidenceFingerprint({ release, body: 'notes', baselineRelease: null, state }),
   );
+});
+
+test('computeReviewedSourceDigest covers reviewed source and ignores build output', () => {
+  const sources = {
+    'addons/godot_gdk/src/gdk.cpp': 'int main() { return 0; }\n',
+    'cmake/GDKPackaging.cmake': '# packaging\n',
+    'tools/run_all_tests.ps1': 'Write-Host hi\n',
+  };
+  const root = makeSupportFixture({ sources });
+  const base = watch.computeReviewedSourceDigest(root);
+
+  // Stable across calls, and unaffected by gitignored build and restore output
+  // that only exists on a machine where someone has built the tree.
+  assert.equal(watch.computeReviewedSourceDigest(root), base);
+  fs.mkdirSync(path.join(root, 'addons', 'godot_gdk', 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'addons', 'godot_gdk', 'bin', 'godot_gdk.dll'), 'binary');
+  fs.mkdirSync(path.join(root, 'tools', 'node_modules', 'left-pad'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'tools', 'node_modules', 'left-pad', 'index.js'), 'module.exports = 1;');
+  assert.equal(watch.computeReviewedSourceDigest(root), base);
+
+  // An area that does not exist in this checkout contributes nothing rather
+  // than failing discovery.
+  assert.equal(watch.computeReviewedSourceDigest(makeSupportFixture({ sources })), base);
+
+  fs.writeFileSync(path.join(root, 'addons', 'godot_gdk', 'src', 'gdk.cpp'), 'int main() { return 1; }\n');
+  assert.notEqual(watch.computeReviewedSourceDigest(root), base);
+});
+
+test('computeEvidenceFingerprint tracks the repository source the assessment reviewed', () => {
+  // A completed assessment describes this repository at a point in time. If a
+  // source-only change left the fingerprint alone, `assessmentDecision` would
+  // keep serving a report written against an older snapshot.
+  const release = eligible(makeRelease());
+  const fingerprintFor = (sources) =>
+    watch.computeEvidenceFingerprint({
+      release,
+      body: 'notes',
+      baselineRelease: null,
+      state: watch.readSupportState(makeSupportFixture({ sources })),
+    });
+
+  const base = fingerprintFor({ 'addons/godot_gdk/src/gdk.cpp': 'void a();\n' });
+  assert.equal(fingerprintFor({ 'addons/godot_gdk/src/gdk.cpp': 'void a();\n' }), base);
+  assert.notEqual(fingerprintFor({ 'addons/godot_gdk/src/gdk.cpp': 'void b();\n' }), base);
+  assert.notEqual(fingerprintFor({ 'addons/godot_playfab/src/playfab.cpp': 'void a();\n' }), base);
 });
 
 // ---------------------------------------------------------------------------

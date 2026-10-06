@@ -199,6 +199,10 @@ Review at least these areas and name the ones you reviewed:
   `.github/gdk-versions.json` — how an edition is selected and pinned.
 - `addons/godot_gdk_editortools/` and `tools/` — packaging and MakePkg flows.
 
+<!-- Keep this list in sync with REVIEWED_SOURCE_PATHS in
+     tools/ci/gdk_release_watch.cjs: those paths feed the evidence fingerprint,
+     which is what makes a source change invalidate a finished assessment. -->
+
 Treat as **required changes** only things with a concrete call site or build
 setting in this repository: a removed or renamed API we call, a changed
 signature or enum we pass, a new required initialization step, a changed

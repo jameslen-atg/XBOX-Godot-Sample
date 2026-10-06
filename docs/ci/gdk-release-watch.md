@@ -78,9 +78,21 @@ Everything else is skipped with a reason recorded in the run summary.
 It queues at most one release per run, so a backlog drains one release per week
 unless you dispatch it manually with `drain_backlog`. Tracking issues are the
 durable queue: a bot-authored issue carries the release id, the last assessment
-status, and the fingerprint of the evidence that status was based on. If the
-upstream notes or this repository's support lists change, the fingerprint
-changes and the release is reassessed.
+status, and the fingerprint of the evidence that status was based on. The
+fingerprint covers the upstream release notes, the baseline notes the delta is
+computed against, this repository's support lists, and a content digest of the
+source the agent is told to review — `addons/godot_gdk`, `addons/godot_gameinput`,
+`addons/godot_playfab`, `addons/godot_gdk_editortools`, `cmake`, and `tools`,
+minus build and restore output. If any of that changes, the fingerprint changes
+and the release is reassessed; a report always describes a known snapshot of
+this repository rather than whatever `main` happens to hold now. Cosmetic
+upstream metadata edits — a retitled release, a new publication timestamp — do
+not change it, so they never burn another model run.
+
+If you add a reviewed area to the agent prompt in
+`.github/workflows/gdk-release-assess.md`, add it to `REVIEWED_SOURCE_PATHS` in
+`tools/ci/gdk_release_watch.cjs` as well. An area the agent reviews but the
+fingerprint ignores is a source of silently stale assessments.
 
 If an assessor run dies without posting a report — a rejected dispatch, a
 crashed agent, a blocked safe output — its ledger entry would otherwise read

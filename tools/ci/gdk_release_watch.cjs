@@ -42,7 +42,30 @@ const LIMITS = Object.freeze({
   // An assessment that has not reported back well inside this window is dead:
   // the assessor finishes in minutes, and the watcher polls weekly.
   assessmentTimeoutMs: 6 * 60 * 60 * 1000,
+  // A guard, not a budget: the reviewed tree is a few hundred text files. A
+  // count far above that means an ignore rule stopped matching, and hashing a
+  // build output tree would be both slow and permanently unstable.
+  maxReviewedSourceFiles: 5000,
 });
+
+// The areas the agent is told to review, from the "Review at least these areas"
+// list in .github/workflows/gdk-release-assess.md. Keep the two in sync: this
+// is what makes a source-only change invalidate a completed assessment.
+const REVIEWED_SOURCE_PATHS = Object.freeze([
+  'addons/godot_gdk',
+  'addons/godot_gameinput',
+  'addons/godot_playfab',
+  'addons/godot_gdk_editortools',
+  'cmake',
+  'tools',
+]);
+
+// Build and restore outputs. These are gitignored, so they exist only on a
+// developer machine, and hashing them would make the fingerprint depend on
+// whether someone had built the tree.
+const REVIEWED_SOURCE_IGNORED_DIRS = Object.freeze(
+  new Set(['.git', '.godot', '.vs', 'bin', 'build', 'node_modules', 'third_party', 'vcpkg_installed']),
+);
 
 const MONTHS = Object.freeze({
   january: 1,
@@ -232,6 +255,47 @@ function readJsonFile(root, relative) {
   }
 }
 
+// A content digest over the source the assessor is actually asked to review.
+// Without it the evidence fingerprint covers only the upstream notes and the
+// support lists, so an addon or packaging change made against an already
+// assessed release leaves the fingerprint untouched and `assessmentDecision`
+// keeps serving a report that describes an older snapshot of this repository.
+function computeReviewedSourceDigest(root) {
+  const files = [];
+  const visit = (absolute, relative) => {
+    let stats;
+    try {
+      stats = fs.lstatSync(absolute);
+    } catch (error) {
+      // A reviewed area that does not exist in this checkout contributes
+      // nothing; it must not break discovery.
+      if (error.code === 'ENOENT') return;
+      throw new WatchError(`${relative} could not be inspected: ${error.message}`);
+    }
+    if (stats.isFile()) {
+      files.push(relative);
+      return;
+    }
+    // Symlinks are skipped rather than followed: they cannot be hashed
+    // deterministically and a cycle would hang the watcher.
+    if (!stats.isDirectory()) return;
+    for (const entry of fs.readdirSync(absolute)) {
+      if (REVIEWED_SOURCE_IGNORED_DIRS.has(entry)) continue;
+      visit(path.join(absolute, entry), `${relative}/${entry}`);
+    }
+  };
+  for (const area of REVIEWED_SOURCE_PATHS) visit(path.join(root, area), area);
+  if (files.length > LIMITS.maxReviewedSourceFiles) {
+    throw new WatchError(
+      `The reviewed source tree has ${files.length} files, above the ${LIMITS.maxReviewedSourceFiles} limit; ` +
+        'an ignore rule in REVIEWED_SOURCE_IGNORED_DIRS has probably stopped matching.',
+    );
+  }
+  files.sort();
+  const lines = files.map((relative) => `${relative}:${sha256(fs.readFileSync(path.join(root, relative)))}`);
+  return sha256(lines.join('\n'));
+}
+
 // The two support lists are independent and are not interchangeable: the CMake
 // allowlist governs an SDK installed on disk, the hosted matrix governs vcpkg
 // `ms-gdk` port versions that a GitHub-hosted runner can restore.
@@ -250,6 +314,7 @@ function readSupportState(root) {
     installedEditions,
     hosted,
     baseline,
+    reviewedSource: computeReviewedSourceDigest(root),
     minimumEdition: String(MINIMUM_EDITION),
   };
 }
@@ -329,6 +394,10 @@ function computeEvidenceFingerprint({ release, body, baselineRelease, baselineBo
       hostedDefault: state.hosted.default,
       baseline: state.baseline,
     },
+    // The reviewed source is evidence as much as the notes are: a completed
+    // assessment describes this repository at a point in time, so changing the
+    // addons, CMake, or packaging tooling it reviewed makes it stale.
+    reviewedSource: state.reviewedSource || null,
   });
   return sha256(canonical);
 }
@@ -862,6 +931,7 @@ module.exports = {
   classifyRelease,
   compareReleases,
   computeEvidenceFingerprint,
+  computeReviewedSourceDigest,
   editionOf,
   evaluateTrustedContext,
   findSupportBaselineRelease,
