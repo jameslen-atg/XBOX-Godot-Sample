@@ -122,11 +122,16 @@ async function msGdkBaselineVersion({ github, ref }) {
 }
 
 async function listRegistryCommits({ github }) {
+  // response.data is a single page, so comparing its length to the cap never
+  // stops anything: paginate() would walk the entire history of the version
+  // database and throw all but the first 300 away. Count across pages instead.
+  let seen = 0;
   const commits = await github.paginate(
     github.rest.repos.listCommits,
     { owner: VCPKG_OWNER, repo: VCPKG_REPO, path: MS_GDK_VERSIONS_PATH, per_page: 100 },
     (response, done) => {
-      if (response.data.length >= LIMITS.maxRegistryCommits) done();
+      seen += response.data.length;
+      if (seen >= LIMITS.maxRegistryCommits) done();
       return response.data;
     },
   );
@@ -952,6 +957,7 @@ module.exports = {
   findPortEntry,
   isDescendant,
   leadingComments,
+  listRegistryCommits,
   msGdkBaselineVersion,
   openSupportProposal,
   parsePortVersion,

@@ -288,7 +288,7 @@ function selectBacklog({ releases, state }) {
       continue;
     }
     const status = supportStatusFor(verdict.release.edition, state);
-    const entry = { ...verdict.release, hostedAvailable: status.hosted };
+    const entry = { ...verdict.release, hostedListed: status.hosted };
     if (status.supported) supported.push(entry);
     else unsupported.push(entry);
   }
@@ -633,11 +633,15 @@ function renderSummary({ backlog, decisions, trusted, preview }) {
     '',
   ];
   if (backlog.unsupported.length) {
-    lines.push('| Release | Edition | Hosted port | Action |', '| --- | --- | --- | --- |');
+    // "Hosted matrix" is membership in .github/gdk-versions.json, which is all
+    // this column knows. The watcher performs no registry lookup, so it must not
+    // imply the port is or is not published in vcpkg; the support step resolves
+    // that for the one release it actually proposes.
+    lines.push('| Release | Edition | Hosted matrix | Action |', '| --- | --- | --- | --- |');
     for (const release of backlog.unsupported) {
       const decision = decisions.get(String(release.id));
       lines.push(
-        `| \`${release.tag}\` | \`${release.edition}\` | ${release.hostedAvailable ? 'available' : 'not published'} | ${decision ? decision.reason : 'pending'} |`,
+        `| \`${release.tag}\` | \`${release.edition}\` | ${release.hostedListed ? 'listed' : 'not listed'} | ${decision ? decision.reason : 'pending'} |`,
       );
     }
     lines.push('');

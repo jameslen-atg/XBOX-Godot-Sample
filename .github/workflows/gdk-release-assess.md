@@ -35,9 +35,12 @@ permissions:
 engine:
   id: copilot
 # Keep in sync with DOC_HOSTS in tools/ci/issue_triage.cjs.
+# No `defaults` bundle: this agent has no bash and no package installs, so the
+# apt/snap/registry hosts it adds are pure egress surface. Release notes are
+# untrusted input and `web_fetch` is prompt-restricted to these two hosts; the
+# firewall is what enforces that when the prompt is subverted.
 network:
   allowed:
-    - defaults
     - devdocs.xbox.com
     - learn.microsoft.com
 strict: true

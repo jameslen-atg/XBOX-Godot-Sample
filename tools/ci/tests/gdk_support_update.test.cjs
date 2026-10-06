@@ -134,6 +134,40 @@ function registryCommits() {
 // Bounded file edits
 // ---------------------------------------------------------------------------
 
+test('listRegistryCommits stops paginating once the commit cap is reached', async () => {
+  // A real Octokit paginate() keeps calling until the mapper calls done(), so a
+  // cap compared against one page's length (<= per_page) never fires and the
+  // whole version-database history gets fetched and then discarded.
+  const pages = 12;
+  let requested = 0;
+  const github = {
+    paginate: async (fn, params, mapper) => {
+      const collected = [];
+      let stop = false;
+      const done = () => {
+        stop = true;
+      };
+      for (let page = 0; page < pages && !stop; page += 1) {
+        const response = await fn({ ...params, page });
+        collected.push(...mapper(response, done));
+      }
+      return collected;
+    },
+    rest: {
+      repos: {
+        listCommits: async ({ page }) => {
+          requested += 1;
+          return { data: Array.from({ length: 100 }, (_, i) => ({ sha: `${page}-${i}` })) };
+        },
+      },
+    },
+  };
+
+  const commits = await support.listRegistryCommits({ github });
+  assert.equal(commits.length, support.LIMITS.maxRegistryCommits, 'the cap still bounds the result');
+  assert.equal(requested, 3, 'three 100-commit pages reach the 300 cap; the other nine are never fetched');
+});
+
 test('updateSupportedEditions inserts the edition in order and leaves the rest alone', () => {
   const result = support.updateSupportedEditions(CMAKE_FIXTURE, '260402');
   assert.equal(result.changed, true);

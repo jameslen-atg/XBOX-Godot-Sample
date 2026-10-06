@@ -35,6 +35,16 @@ requests; it emits one JSON report and the helpers above decide what is
 published. The release notes it reads are untrusted text, fenced and labelled as
 data in the evidence bundle.
 
+Its egress allowlist is exactly `learn.microsoft.com` and `devdocs.xbox.com`.
+Unlike `issue-triage.md`, this workflow deliberately omits gh-aw's `defaults`
+host bundle: that bundle adds roughly three dozen apt, snap, package-registry
+and certificate-revocation hosts, and this agent has no shell and installs
+nothing, so those hosts would only widen the exfiltration surface available to a
+prompt-injection payload hidden in upstream release notes. `doc_references`
+hosts are validated a second time in `tools/ci/gdk_release_assess.cjs`, so a
+cited URL outside those two hosts fails publication even if the fetch somehow
+succeeded.
+
 ## What counts as a release worth tracking
 
 A release is queued only when all of these hold:

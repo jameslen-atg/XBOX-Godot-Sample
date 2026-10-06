@@ -314,6 +314,28 @@ test('selectBacklog partitions releases and orders unsupported ones oldest first
     'October_2024_Update_2',
   ]);
   assert.equal(backlog.conflicts.length, 1);
+  // hostedListed is matrix membership, not a registry lookup. 2604.5.7903 is
+  // absent from .github/gdk-versions.json, which says nothing about whether the
+  // port exists upstream.
+  assert.equal(backlog.unsupported[0].hostedListed, false);
+  assert.equal(Object.prototype.hasOwnProperty.call(backlog.unsupported[0], 'hostedAvailable'), false);
+});
+
+test('the run summary reports hosted matrix membership without claiming registry status', async () => {
+  const github = fakeGithub({ releases: watchReleases() });
+  const core = fakeCore();
+  await watch.runWatch({
+    github,
+    context: CONTEXT,
+    core,
+    env: { ...TRUSTED_ENV, GDK_WATCH_INPUTS: '{"preview":true}' },
+    root: makeSupportFixture(),
+  });
+  assert.match(core.summaryText, /\| Hosted matrix \|/);
+  assert.match(core.summaryText, /not listed/);
+  // "available"/"not published" would assert a vcpkg fact the watcher never checked.
+  assert.doesNotMatch(core.summaryText, /not published/);
+  assert.doesNotMatch(core.summaryText, /Hosted port/);
 });
 
 test('findSupportBaselineRelease prefers the newest supported release in the same family', () => {
