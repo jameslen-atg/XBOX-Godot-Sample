@@ -204,6 +204,16 @@ const RULES = [
 
   // Repo-wide native build inputs: conservative full fan-out.
   {
+    name: 'shared initialization telemetry policy',
+    kind: 'specific',
+    test: pre('addons/initialization_telemetry/'),
+    apply: (sel) => {
+      component(sel, 'gdk');
+      component(sel, 'playfab');
+      sel.doctest = true;
+    },
+  },
+  {
     name: 'shared native build inputs',
     kind: 'specific',
     test: eq(
