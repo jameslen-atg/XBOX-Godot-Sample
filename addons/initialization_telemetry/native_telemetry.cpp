@@ -149,8 +149,7 @@ bool valid_payload(const EventPayload &p) {
             !valid_value(p.package_publisher_id, PACKAGE_PUBLISHERID_MAX_LENGTH) ||
             !valid_value(p.playfab_title_id, IDENTIFIER_LIMIT) ||
             p.development_context < DevelopmentContext::editor ||
-            p.development_context > DevelopmentContext::development_runtime ||
-            p.device_type > DeviceType::console) {
+            p.development_context > DevelopmentContext::development_runtime) {
         return false;
     }
     if (!p.xbox_title_id.empty()) {
@@ -205,7 +204,7 @@ void write_initialized(const ImageSession &p_session, const EventPayload &p) {
             TraceLoggingUInt32(static_cast<uint32_t>(p.development_context), "DevelopmentContext"),
             TraceLoggingWideString(p.configured_title_package_family_name.c_str(), "ConfiguredTitlePackageFamilyName"),
             TraceLoggingWideString(p.package_publisher_id.c_str(), "PackagePublisherId"),
-            TraceLoggingUInt32(static_cast<uint32_t>(p.device_type), "DeviceType"),
+            TraceLoggingUInt32(p.device_type, "DeviceType"),
             TraceLoggingWideString(p.xbox_title_id.c_str(), "XboxTitleId"),
             TraceLoggingWideString(p.playfab_title_id.c_str(), "PlayFabTitleId"));
 }

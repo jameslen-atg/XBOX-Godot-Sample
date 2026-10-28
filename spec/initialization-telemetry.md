@@ -114,13 +114,18 @@ No persistent user/device/install identifiers.
 | DevelopmentContext | UInt32 enum | Editor = 1, editor-runtime = 2, development runtime = 3; tooling = 4 is reserved, not emitted |
 | ConfiguredTitlePackageFamilyName | UnicodeString | Explicit valid game config identity, not editor identity |
 | PackagePublisherId | UnicodeString | Windows package publisher ID from configured game PFN |
-| DeviceType | UInt32 enum | Unknown = 0, PC = 1, Console = 2; XSystemGetDeviceType maps unknown future values to Unknown |
+| DeviceType | UInt32 enum | Exact `XSystemDeviceType` numeric value returned by `XSystemGetDeviceType()`, without model flattening or remapping |
 | XboxTitleId | UnicodeString | XGameGetXboxTitleId as eight uppercase hex digits, else empty |
 | PlayFabTitleId | UnicodeString | Resolved configured PlayFab title ID, else empty |
 
 Underlying PlayFab SDK versions are expressly excluded; SDK HTTP headers already
 provide that attribution outside this event. Keep the addon's ComponentVersion.
 Do not inspect network traffic or investigate another SDK-version field.
+
+The selected GDK defines device values as Unknown = 0, Pc = 1, XboxOne = 2,
+XboxOneS = 3, XboxOneX = 4, XboxOneXDevkit = 5, XboxScarlettLockhart = 6,
+XboxScarlettAnaconda = 7 and XboxScarlettDevkit = 8. Preserve future UInt32 values
+unchanged rather than coercing them to Unknown or suppressing the event.
 
 Lengths are UTF-16 code units, excluding the terminating NUL. Versions are limited
 to 128, component/PlayFab IDs to 256, configured PFN to Windows'
@@ -159,7 +164,7 @@ unavailable. Do not substitute `availableVersion`, an OS version or a build SDK.
 
 Include grdk.h independently of the existing feature-gate wrappers that synthesize
 999999. Missing or synthetic metadata is unavailable; preserve existing feature
-gates. Device categorization does not add console build support.
+gates. Recording console device enum values does not add console build support.
 
 Other-engine/direct-SDK/managed consumers may reuse the vocabulary only with an
 explicitly reviewed source and eligibility mapping: component version describes
@@ -253,6 +258,9 @@ public repository content. There is no uploader or remote destination.
   Removed XmlLite, Shlwapi and the native XML-validation helper/tests. Repeated
   the capture matrix with the Godot parser, including the trailing-whitespace
   config that exposed the earlier traversal issue; identity fields remain correct.
+- User-directed device attribution: preserve the actual `XSystemDeviceType`
+  numeric result, including model/devkit distinctions and future values, instead
+  of flattening consoles into one category.
 - **Still needed for centralized delivery:** collector/transport owner, intended
   destination/table/route, supported release/distribution scope, retention and
   recipients, applicable privacy/event classification and approvals, reporting
@@ -268,8 +276,8 @@ public repository content. There is no uploader or remote destination.
 | `cmake --build --preset debug --target godot_gdk godot_playfab gdk_unit_tests` | Passed |
 | `cmake --preset default-release` | Passed, separate Release tree |
 | `cmake --build --preset release --target godot_gdk godot_playfab gdk_unit_tests` | Passed |
-| `.\build\bin\Debug\gdk_unit_tests.exe` | 25 cases / 1803 assertions passed |
-| `.\build\release\bin\Release\gdk_unit_tests.exe` | 25 cases / 1803 assertions passed |
+| `.\build\bin\Debug\gdk_unit_tests.exe` | 26 cases / 1814 assertions passed |
+| `.\build\release\bin\Release\gdk_unit_tests.exe` | 26 cases / 1814 assertions passed |
 | `cmake --preset gdk-only` then `cmake --build --preset debug-gdk --target godot_gdk` | Passed, independent GDK Debug |
 | `cmake --preset playfab-only` then `cmake --build --preset debug-playfab --target godot_playfab` | Passed, independent PlayFab Debug |
 | `cmake --preset gdk-only-release` then `cmake --build --preset release-gdk --target godot_gdk` | Passed, independent GDK Release |
@@ -300,7 +308,9 @@ produced two. `RIT_SUPPRESS_TELEMETRY` values `0`, `false` and whitespace each
 produced zero. Sequences were 1/2 per component, session GUIDs were stable within
 each image and distinct across components/processes. Captured metadata included
 the actual engine string, running Gaming Runtime version, real `_GRDK_EDITION`
-value, configured PFN/publisher, and canonical Xbox/PlayFab title IDs. ETL and
+value, configured PFN/publisher, canonical Xbox/PlayFab title IDs and the exact
+`XSystemDeviceType::Pc` value (1). Console/devkit and future device values have
+native payload-validation coverage, not console hardware coverage. ETL and
 the synthetic harness remain local session artifacts, not public source.
 
 Limitations: registered/packaged controls and loose debug/release export controls

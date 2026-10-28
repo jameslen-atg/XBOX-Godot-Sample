@@ -86,6 +86,17 @@ TEST_CASE("telemetry payload rejects oversized, malformed Unicode and noncanonic
     CHECK_FALSE(valid_payload(payload));
 }
 
+TEST_CASE("telemetry accepts every SDK device model and future device type values") {
+    EventPayload payload;
+    payload.component_id = L"godot_gdk";
+    payload.component_version = L"0.3.0";
+    payload.development_context = DevelopmentContext::development_runtime;
+    for (const uint32_t device : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 0xdeadbeefu, 0xffffffffu}) {
+        payload.device_type = device;
+        CHECK(valid_payload(payload));
+    }
+}
+
 TEST_CASE("local telemetry provider registration is idempotent and can be safely torn down") {
     REQUIRE(register_provider() == ERROR_SUCCESS);
     CHECK(register_provider() == ERROR_SUCCESS);

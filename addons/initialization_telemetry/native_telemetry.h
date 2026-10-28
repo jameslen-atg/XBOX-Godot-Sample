@@ -21,7 +21,6 @@ inline constexpr size_t IDENTIFIER_LIMIT = 256;
 enum class EnvironmentSuppression { absent_or_empty, suppressed, unavailable };
 enum class ComponentKind : uint32_t { native_sdk = 1, managed_sdk = 2, engine_addon = 3, language_wrapper = 4 };
 enum class DevelopmentContext : uint32_t { unknown = 0, editor = 1, editor_runtime = 2, development_runtime = 3, tooling = 4 };
-enum class DeviceType : uint32_t { unknown = 0, pc = 1, console = 2 };
 
 struct EventPayload {
     std::wstring component_id;
@@ -32,7 +31,7 @@ struct EventPayload {
     DevelopmentContext development_context = DevelopmentContext::unknown;
     std::wstring configured_title_package_family_name;
     std::wstring package_publisher_id;
-    DeviceType device_type = DeviceType::unknown;
+    uint32_t device_type = 0;
     std::wstring xbox_title_id;
     std::wstring playfab_title_id;
 };

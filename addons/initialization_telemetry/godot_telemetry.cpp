@@ -101,20 +101,6 @@ void collect_configured_identity(const godot::String &p_selected_path, EventPayl
     }
 }
 
-DeviceType collect_device_type() {
-    switch (XSystemGetDeviceType()) {
-        case XSystemDeviceType::Pc: return DeviceType::pc;
-        case XSystemDeviceType::XboxOne:
-        case XSystemDeviceType::XboxOneS:
-        case XSystemDeviceType::XboxOneX:
-        case XSystemDeviceType::XboxOneXDevkit:
-        case XSystemDeviceType::XboxScarlettLockhart:
-        case XSystemDeviceType::XboxScarlettAnaconda:
-        case XSystemDeviceType::XboxScarlettDevkit: return DeviceType::console;
-        default: return DeviceType::unknown;
-    }
-}
-
 } // namespace
 
 void initialize() {
@@ -178,7 +164,7 @@ void record_initialized(bool p_with_options, const godot::String &p_config_path,
         diagnostic("Engine version exceeds the telemetry contract; the field is unavailable.");
     }
     payload.development_context = development_context(decision);
-    payload.device_type = collect_device_type();
+    payload.device_type = static_cast<uint32_t>(XSystemGetDeviceType());
     const XVersion runtime_version = XSystemGetRuntimeInfo().runtimeVersion;
     if (runtime_version.major || runtime_version.minor || runtime_version.build || runtime_version.revision) {
         payload.gaming_runtime_version = std::to_wstring(runtime_version.major) + L"." +
