@@ -1,8 +1,8 @@
 # SDK component initialization telemetry
 
 Status: native local-capture ETW emission implemented for both addons.
-**No central collector, upload route, destination or production classification
-is configured or claimed approved.** The user explicitly authorized a project-owned
+**No central collector, upload route, destination or production approval
+is configured or claimed complete.** The user explicitly authorized a project-owned
 provider for local capture; the RIT runbook is a reference, not a dependency.
 
 This is the shared design for `godot_gdk` and `godot_playfab`. It does not change
@@ -42,8 +42,14 @@ printing identity values, paths, credentials, or payloads. Disabled consumers an
 missing optional metadata are expected, not failures to retry.
 
 Provider: `GodotGamingAddons.Initialization`, GUID
-`{FB4DE56A-AB3F-4E6A-8254-DDDCFCC76572}`, informational level 4, keyword `0x1`.
-It has no Microsoft provider-group or privacy/Core/Critical classification tags.
+`{FB4DE56A-AB3F-4E6A-8254-DDDCFCC76572}`, informational ETW severity level 4,
+Core event tag `0x00080000` and Critical Data category keyword
+`0x0000800000000000`. Core is not an ETW severity level. These values match
+`MICROSOFT_EVENTTAG_CORE_DATA` and `MICROSOFT_KEYWORD_CRITICAL_DATA` in the
+[public WIL definitions](https://github.com/microsoft/wil/blob/master/include/wil/traceloggingconfig.h).
+They are event metadata, not additional payload fields. Core classification was
+user-directed; it is not a claim of approval or automatic UTC collection.
+No Microsoft provider group or privacy data tag is configured.
 The name/GUID are project-owned local-capture identifiers, not placeholders for
 an approved Microsoft provider. Registering this provider does not configure a
 Windows telemetry upload channel. An authorized ETW consumer must enable it;
@@ -196,7 +202,8 @@ A forwarding wrapper must not emit a second native initialization event.
    Do not elevate, install/register a package or switch sandbox without permission.
 5. **Choose production collection, if wanted.** Obtain the intended collector,
    route/destination, retention/recipients, release scope, ownership and applicable
-   privacy/classification decisions. No centralized delivery is implemented.
+   privacy data tags and required approvals for the requested Core classification.
+   No centralized delivery is implemented.
    Provider filtering and the user's local-capture approval are not production
    distribution/privacy approval.
 6. **Onboard the chosen backend.** Follow that pipeline's actual requirements.
@@ -221,7 +228,7 @@ authorized synthetic capture, start a session, unset that variable **only in the
 controlled process environment**, run the game, then stop/decode:
 
 ```powershell
-logman start GodotAddonInit -p "{FB4DE56A-AB3F-4E6A-8254-DDDCFCC76572}" 0x1 4 -o .\addon-init.etl -ets
+logman start GodotAddonInit -p "{FB4DE56A-AB3F-4E6A-8254-DDDCFCC76572}" 0x0000800000000000 4 -o .\addon-init.etl -ets
 # Launch the eligible development game here, without RIT_SUPPRESS_TELEMETRY.
 logman stop GodotAddonInit -ets
 tracerpt .\addon-init.etl -o .\addon-init.xml -of XML -y
@@ -261,9 +268,19 @@ public repository content. There is no uploader or remote destination.
 - User-directed device attribution: preserve the actual `XSystemDeviceType`
   numeric result, including model/devkit distinctions and future values, instead
   of flattening consoles into one category.
+- User-directed Core classification: emit the public Core event tag and Critical
+  Data keyword, keeping ETW severity Informational and all 18 payload fields
+  unchanged. Provider-group/UTC routing, privacy tagging and approvals remain
+  separate pending work, not implied by the event classification.
+  Rebuilt both addons in Debug/Release and passed both native suites (26 cases,
+  1816 assertions each). All nine local capture scenarios passed; Windows TDH
+  verified the actual Core tag, Critical Data keyword, Informational severity and
+  unchanged 18-field schema on four combined-addon events. The orchestrator was
+  intentionally not repeated for this metadata-only follow-up; no `.gd` edits
+  or live-service tests/writes were involved.
 - **Still needed for centralized delivery:** collector/transport owner, intended
   destination/table/route, supported release/distribution scope, retention and
-  recipients, applicable privacy/event classification and approvals, reporting
+  recipients, privacy data tags and required Core/privacy approvals, reporting
   owner and success criteria. No remote delivery is implemented or claimed.
 - TRTT, DataGrid, Privacy/STaR, Dr. Isaac, Interceptor and ADX remain **pending/not
   performed**, and are relevant only if that specific backend is chosen.
@@ -276,8 +293,8 @@ public repository content. There is no uploader or remote destination.
 | `cmake --build --preset debug --target godot_gdk godot_playfab gdk_unit_tests` | Passed |
 | `cmake --preset default-release` | Passed, separate Release tree |
 | `cmake --build --preset release --target godot_gdk godot_playfab gdk_unit_tests` | Passed |
-| `.\build\bin\Debug\gdk_unit_tests.exe` | 26 cases / 1814 assertions passed |
-| `.\build\release\bin\Release\gdk_unit_tests.exe` | 26 cases / 1814 assertions passed |
+| `.\build\bin\Debug\gdk_unit_tests.exe` | 26 cases / 1816 assertions passed |
+| `.\build\release\bin\Release\gdk_unit_tests.exe` | 26 cases / 1816 assertions passed |
 | `cmake --preset gdk-only` then `cmake --build --preset debug-gdk --target godot_gdk` | Passed, independent GDK Debug |
 | `cmake --preset playfab-only` then `cmake --build --preset debug-playfab --target godot_playfab` | Passed, independent PlayFab Debug |
 | `cmake --preset gdk-only-release` then `cmake --build --preset release-gdk --target godot_gdk` | Passed, independent GDK Release |

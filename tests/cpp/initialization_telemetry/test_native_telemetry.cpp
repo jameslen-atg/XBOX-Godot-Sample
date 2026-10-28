@@ -98,6 +98,8 @@ TEST_CASE("telemetry accepts every SDK device model and future device type value
 }
 
 TEST_CASE("local telemetry provider registration is idempotent and can be safely torn down") {
+    CHECK(INITIALIZATION_KEYWORD == 0x0000800000000000ULL);
+    CHECK(INITIALIZATION_EVENT_TAGS == 0x00080000u);
     REQUIRE(register_provider() == ERROR_SUCCESS);
     CHECK(register_provider() == ERROR_SUCCESS);
     unregister_provider();

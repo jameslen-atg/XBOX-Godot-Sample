@@ -189,6 +189,7 @@ void write_initialized(const ImageSession &p_session, const EventPayload &p) {
     TraceLoggingWrite(provider, "SdkComponentInitialized",
             TraceLoggingLevel(WINEVENT_LEVEL_INFO),
             TraceLoggingKeyword(INITIALIZATION_KEYWORD),
+            TraceLoggingEventTag(INITIALIZATION_EVENT_TAGS),
             TraceLoggingUInt32(1, "SchemaVersion"),
             TraceLoggingWideString(p.component_id.c_str(), "ComponentId"),
             TraceLoggingWideString(p.component_version.c_str(), "ComponentVersion"),
