@@ -68,6 +68,12 @@ test('shared initialization telemetry selects both owners and native policy test
   assert.equal(r.editortools, false);
   assert.deepEqual(r.fuzz_targets, []);
   assert.deepEqual(r.fallback, []);
+  const suite = classify('tests/cpp/initialization_telemetry/test_development_policy.cpp');
+  assert.equal(suite.doctest, true);
+  assert.equal(suite.full, false);
+  assert.deepEqual(suite.components, []);
+  assert.deepEqual(suite.fuzz_targets, []);
+  assert.deepEqual(suite.fallback, []);
 });
 
 test('GDK change selects GDK without PlayFab or GameInput', () => {

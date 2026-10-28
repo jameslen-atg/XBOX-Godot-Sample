@@ -449,6 +449,7 @@ const RULES = [
       p === 'tests/cpp/main.cpp' ||
       p.startsWith('tests/cpp/result_codes/') ||
       p.startsWith('tests/cpp/request_key/') ||
+      p.startsWith('tests/cpp/initialization_telemetry/') ||
       p.startsWith('tests/cpp/third_party/'),
     apply: (sel) => {
       sel.doctest = true;
