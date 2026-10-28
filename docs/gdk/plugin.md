@@ -7,8 +7,8 @@ This is the landing page for the `godot_gdk` docs set.
 ## Current implementation status
 
 Successful unpackaged development initialization can emit a local ETW
-`SdkComponentInitialized` event through the project-owned
-`GodotGamingAddons.Initialization` provider, only when an ETW consumer enables it.
+`SdkComponentInitialized` event through the user-named
+`Microsoft.Gaming.Middleware` provider using its local-capture GUID, only when an ETW consumer enables it.
 Packaged/debug-packaged and release games are excluded; any nonempty process
 `RIT_SUPPRESS_TELEMETRY` value suppresses collection. Each successful cycle is
 counted independently, before the `initialized` callback. No uploader or cloud

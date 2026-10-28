@@ -41,7 +41,7 @@ runtime ownership. Use bounded local diagnostics for unexpected errors without
 printing identity values, paths, credentials, or payloads. Disabled consumers and
 missing optional metadata are expected, not failures to retry.
 
-Provider: `GodotGamingAddons.Initialization`, GUID
+User-supplied provider name: `Microsoft.Gaming.Middleware`, local-capture GUID
 `{FB4DE56A-AB3F-4E6A-8254-DDDCFCC76572}`, informational ETW severity level 4,
 Core event tag `0x00080000` and Critical Data category keyword
 `0x0000800000000000`. Core is not an ETW severity level. These values match
@@ -49,10 +49,17 @@ Core event tag `0x00080000` and Critical Data category keyword
 [public WIL definitions](https://github.com/microsoft/wil/blob/master/include/wil/traceloggingconfig.h).
 They are event metadata, not additional payload fields. Core classification was
 user-directed; it is not a claim of approval or automatic UTC collection.
-No Microsoft provider group or privacy data tag is configured.
-The name/GUID are project-owned local-capture identifiers, not placeholders for
-an approved Microsoft provider. Registering this provider does not configure a
-Windows telemetry upload channel. An authorized ETW consumer must enable it;
+No Microsoft provider group or privacy data tag is configured. **Core provider
+registration is not implemented:** the event tag and keyword do not substitute
+for `TraceLoggingOptionWindowsCoreTelemetry()`. Its supported, non-no-op
+definition is still needed; the public WIL definition is intentionally empty
+and must not be used to claim Core registration. Privacy tagging must also be
+reconciled with the current 18-field payload contract before adding standard
+privacy metadata.
+The existing GUID remains project-owned and local-capture-only; an approved GUID
+for this provider name has not been supplied. Neither the name nor the current
+metadata establishes production onboarding. Registering this provider does not
+configure a Windows telemetry upload channel. An authorized ETW consumer must enable it;
 without one, optional metadata is not collected and no event is written.
 
 ## Local eligibility and suppression
@@ -278,7 +285,14 @@ public repository content. There is no uploader or remote destination.
   unchanged 18-field schema on four combined-addon events. The orchestrator was
   intentionally not repeated for this metadata-only follow-up; no `.gd` edits
   or live-service tests/writes were involved.
-- **Still needed for centralized delivery:** collector/transport owner, intended
+- User supplied `Microsoft.Gaming.Middleware` as the provider name. Renamed it
+  without changing the event name or borrowing another component's GUID.
+  Rebuilt Debug/Release, passed both native suites and all nine local capture
+  scenarios, and verified the provider name and unchanged schema with Windows
+  TDH on four actual events. Validation was narrowed to these native/capture
+  checks for the metadata-only rename; no `.gd` edits or live tests.
+- **Still needed for centralized delivery:** approved provider GUID, real Core
+  provider-option definition, collector/transport owner, intended
   destination/table/route, supported release/distribution scope, retention and
   recipients, privacy data tags and required Core/privacy approvals, reporting
   owner and success criteria. No remote delivery is implemented or claimed.

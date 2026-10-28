@@ -12,7 +12,7 @@ namespace initialization_telemetry {
 
 TRACELOGGING_DEFINE_PROVIDER(
         provider,
-        "GodotGamingAddons.Initialization",
+        "Microsoft.Gaming.Middleware",
         (0xfb4de56a, 0xab3f, 0x4e6a, 0x82, 0x54, 0xdd, 0xdc, 0xfc, 0xc7, 0x65, 0x72));
 
 namespace {
