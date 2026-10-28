@@ -14,6 +14,8 @@ Packaged/debug-packaged and release games are excluded; any nonempty process
 counted independently, before the `initialized` callback. No uploader or cloud
 destination is configured. See the [schema, capture steps and pending production
 decisions](../../spec/initialization-telemetry.md).
+The event contains 18 application fields plus the standard
+`PartA_PrivTags` UInt64 usage classification; no new identity fields are added.
 
 ### Implemented now
 

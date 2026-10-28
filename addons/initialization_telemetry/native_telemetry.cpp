@@ -191,6 +191,7 @@ void write_initialized(const ImageSession &p_session, const EventPayload &p) {
             TraceLoggingLevel(WINEVENT_LEVEL_INFO),
             TraceLoggingKeyword(INITIALIZATION_KEYWORD),
             TraceLoggingEventTag(INITIALIZATION_EVENT_TAGS),
+            TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage),
             TraceLoggingUInt32(1, "SchemaVersion"),
             TraceLoggingWideString(p.component_id.c_str(), "ComponentId"),
             TraceLoggingWideString(p.component_version.c_str(), "ComponentVersion"),

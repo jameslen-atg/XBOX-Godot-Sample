@@ -1,9 +1,10 @@
 # SDK component initialization telemetry
 
 Status: native local-capture ETW emission implemented for both addons.
-**No central collector, upload route, destination or production approval
-is configured or claimed complete.** The user explicitly authorized a project-owned
-provider for local capture; the RIT runbook is a reference, not a dependency.
+**Central collection and official-build integration are not configured or
+claimed operational.** Privacy review is confirmed complete by the project owner.
+The user explicitly authorized a project-owned provider for local capture;
+the RIT runbook is a reference, not a dependency.
 
 This is the shared design for `godot_gdk` and `godot_playfab`. It does not change
 their public initialization API. The design is engine/language neutral; its
@@ -61,8 +62,11 @@ This is the intended OSS stub, not a claim of production Core registration.
 An authorized official build must supply the real configuration through its
 controlled build process; this PR does not implement that private package access
 or pipeline, and the real configuration must not be checked into public source.
-No privacy data tag is emitted. Privacy tagging must be reconciled with the
-current 18-field payload contract before adding standard privacy metadata.
+The standard `TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage)` adds
+`PartA_PrivTags` as UInt64 with value `0x0000000002000000`. The owner confirmed
+that formal privacy review is complete and the existing collected IDs are
+covered by applicable agreements. This adds usage classification metadata,
+not new identity fields.
 Neither the name nor the current metadata establishes production onboarding.
 Registering this provider does not configure a Windows telemetry upload channel.
 An authorized ETW consumer must enable it;
@@ -111,13 +115,18 @@ its opaque installation/session token is not a PFN.
 
 ## Local-capture schema version 1
 
-Exactly 18 payload fields plus the ETW header timestamp. Empty optional strings
-retain the fixed schema. No per-field status/source, package/evidence/path,
+Exactly 18 application fields plus the standard UInt64 `PartA_PrivTags` field:
+19 ETW payload fields total, plus the ETW header timestamp. The privacy field
+precedes the application fields below; their names, types and order are unchanged.
+This remains the unreleased schema revision 1; earlier 18-field local captures
+predate the standard privacy field and are not the current capture contract.
+Empty optional strings retain the fixed schema. No per-field status/source, package/evidence/path,
 HRESULT, success flag, redundant SignalType, or current-process PFN fields.
 No persistent user/device/install identifiers.
 
 | Field | Native type | Meaning/source |
 | --- | --- | --- |
+| PartA_PrivTags | UInt64 | Standard privacy metadata: `PDT_ProductAndServiceUsage` = `0x0000000002000000` |
 | SchemaVersion | UInt32 | Payload revision 1 |
 | ComponentId | UnicodeString | `godot_gdk` or `godot_playfab` |
 | ComponentVersion | UnicodeString | Owning addon's plugin.cfg release version, embedded at build time |
@@ -191,6 +200,27 @@ the measured component, engine version describes the actual host, execution
 runtime describes the actual executing runtime, and unavailable values stay empty.
 A forwarding wrapper must not emit a second native initialization event.
 
+### Contract-only consumer examples
+
+These are illustrative mappings, not implemented emitters or evidence of
+additional platform support. Every future adapter needs its own reviewed
+development-eligibility and metadata sources.
+
+| Consumer | Component attribution | Engine / execution runtime | Counting |
+| --- | --- | --- | --- |
+| Native addon for another engine | Its own ComponentId/version; ComponentKind = engine addon (3) | For example, Unreal and the actual running engine version; execution-runtime fields empty for native code | One event per successful eligible initialization of that addon, not its dependencies |
+| Direct native SDK | The measured SDK's own identity/version; ComponentKind = native SDK (1) | Engine and execution-runtime fields empty when neither exists | Its own initialization lifecycle and image/cycle keys |
+| Independently initialized managed SDK | Its own identity/version; ComponentKind = managed SDK (2) | Actual engine if present; observed .NET runtime/version, never inferred from build dependencies | Its own initialization, separate from native dependency initialization |
+| Managed wrapper forwarding to these Godot addons | The existing native event retains `godot_gdk` / `godot_playfab` identity | The native event remains Godot with empty execution-runtime fields | No additional initialization event; separate wrapper-use attribution remains deferred |
+
+Unavailable optional values stay empty. Xbox and PlayFab title IDs remain
+separate namespaces. Publisher grouping identifies configured Windows package
+publisher identity, not ownership verification or a universal organization ID.
+Reporting deduplicates `(ComponentId, RuntimeSessionId, InitializationSequence)`;
+distinct successful cycles remain distinct. Empty publisher identity means
+unknown, not a shared organization. This success-only event cannot
+provide an initialization success rate without a separate attempt denominator.
+
 ## Plan
 
 1. **Establish local contract.** Use the project-owned provider and typed schema
@@ -204,25 +234,30 @@ A forwarding wrapper must not emit a second native initialization event.
    does not belong in XML class docs. Emit no shutdown event; provider teardown
    only unregisters the handle, without writing or flushing.
 3. **Verify source locally.** In runbook order: review exact contract, Debug build,
-   separate-tree Release build, then targeted native and offline tests. Build
-   GDK-only and PlayFab-only configurations and cover both combined init orders,
-   duplicate calls, rollback, retries, reentrant signals, shutdown/reinitialize,
-   duplicate registrations and actual unload/reload. Run the managed headless
-   validator for any .gd change. Suppress ordinary test emissions.
+   separate-tree Release build, then relevant existing native/offline tests.
+   For metadata-only follow-ups, narrow validation to the existing native suites
+   and a controlled capture of both addons. Do not add a regression harness,
+   failure hooks or an expanded acceptance matrix for this follow-up.
+   Run the managed headless validator for any .gd change.
+   Suppress ordinary test emissions.
 4. **Capture locally.** Enable this provider with an authorized ETW session, run
    controlled synthetic addon lifecycle scenarios, stop the session and decode
    its ETL. Check names/types, counts, session/sequence and truthful metadata.
    Do not elevate, install/register a package or switch sandbox without permission.
 5. **Choose production collection, if wanted.** Obtain the intended collector,
-   route/destination, retention/recipients, release scope, ownership and applicable
-   privacy data tags and required approvals for the requested Core classification.
+   route/destination, retention/recipients, release scope, ownership and any
+   required pipeline/release authorizations for the requested Core classification.
+   The privacy category and 19-field shape are selected; formal privacy review
+   is owner-confirmed complete, not a pending implementation prerequisite.
    No centralized delivery is implemented.
    Provider filtering and the user's local-capture approval are not production
-   distribution/privacy approval.
+   distribution authorization.
 6. **Onboard the chosen backend.** Follow that pipeline's actual requirements.
    TRTT/DataGrid, Privacy/STaR, Dr. Isaac and Interceptor/ADX are conditional on
    selecting that Microsoft pipeline, not universal ETW implementation gates.
-   They remain pending/not performed; do not infer approvals from local capture.
+   This implementation performs no backend onboarding; local capture does not
+   establish backend activation. The existing completed privacy review is not
+   an open work item.
 7. **Reporting/evidence.** Report deduplicated cycles separately from loaded
    images, with unavailable-value rules and distinct Xbox/PlayFab namespaces.
    Validate raw-table agreement, duplicate delivery versus repeat cycles, mixed
@@ -283,8 +318,8 @@ public repository content. There is no uploader or remote destination.
   of flattening consoles into one category.
 - User-directed Core classification: emit the public Core event tag and Critical
   Data keyword, keeping ETW severity Informational and all 18 payload fields
-  unchanged. Provider-group/UTC routing, privacy tagging and approvals remain
-  separate pending work, not implied by the event classification.
+  unchanged. At that stage, provider-group/UTC routing and privacy tagging
+  remained separate work, not implied by the event classification.
   Rebuilt both addons in Debug/Release and passed both native suites (26 cases,
   1816 assertions each). All nine local capture scenarios passed; Windows TDH
   verified the actual Core tag, Critical Data keyword, Informational severity and
@@ -308,13 +343,28 @@ public repository content. There is no uploader or remote destination.
   the new GUID with the expected provider name, metadata and 18-field schema.
   Validation was intentionally narrowed to native/routing/capture checks for
   this configuration change; no `.gd` edits or live tests.
+- User approved 18 application fields plus the standard ProductAndServiceUsage
+  privacy field (19 total), and confirmed completed privacy review and agreement
+  coverage for the existing IDs. The source now emits that UInt64 metadata.
+  No new regression harness, failure hooks or expanded acceptance campaign are
+  being added following the user's request to avoid overbuilding regression
+  coverage. This metadata-only follow-up uses existing targeted validation.
+  Rebuilt both addons in Debug and the separate Release tree; existing native
+  suites passed in both (26 cases / 1816 assertions each).
+  One GDK-first capture on official Godot 4.6.2 verified four events from the
+  actual engine PID: all 19 field names/types, the exact privacy mask, unchanged
+  provider/Core markers, and successful-cycle sequences 1/2 for each addon.
+  No `.gd` file changed, so the parse gate was not repeated. The offline
+  orchestrator was intentionally narrowed to the existing native suites and
+  this wire check; no live tests or writes were enabled.
 - **Still needed for centralized delivery:** authorized official-build
   configuration/package access and pipeline, collector/transport owner, intended
   destination/table/route, supported release/distribution scope, retention and
-  recipients, privacy data tags and required Core/privacy approvals, reporting
+  recipients, any remaining pipeline/release authorizations, reporting
   owner and success criteria. No remote delivery is implemented or claimed.
-- TRTT, DataGrid, Privacy/STaR, Dr. Isaac, Interceptor and ADX remain **pending/not
-  performed**, and are relevant only if that specific backend is chosen.
+- No TRTT, DataGrid, Privacy/STaR, Dr. Isaac, Interceptor or ADX onboarding was
+  performed by this implementation. Backend-specific registration remains
+  separate from the owner's already completed privacy review.
 
 ### Local implementation evidence (2026-10-28)
 

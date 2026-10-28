@@ -14,6 +14,8 @@ release games are excluded; any nonempty process `RIT_SUPPRESS_TELEMETRY` value
 suppresses collection. This is native ETW, not PlayFab analytics, and no uploader
 or cloud destination is configured. See the [schema, capture steps and pending
 production decisions](../../spec/initialization-telemetry.md).
+The event contains 18 application fields plus the standard
+`PartA_PrivTags` UInt64 usage classification; no new identity fields are added.
 
 ### Implemented now
 
