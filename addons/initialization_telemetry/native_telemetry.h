@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include "development_policy.h"
+#include "TraceLoggingConfig.h"
 
 #include <cstdint>
 #include <string>
@@ -14,9 +15,8 @@
 
 namespace initialization_telemetry {
 
-// Microsoft Core/Critical Data metadata from public WIL traceloggingconfig.h.
-inline constexpr uint64_t INITIALIZATION_KEYWORD = 0x0000800000000000;
-inline constexpr uint32_t INITIALIZATION_EVENT_TAGS = 0x00080000;
+inline constexpr uint64_t INITIALIZATION_KEYWORD = MICROSOFT_KEYWORD_CRITICAL_DATA;
+inline constexpr uint32_t INITIALIZATION_EVENT_TAGS = MICROSOFT_EVENTTAG_CORE_DATA;
 inline constexpr size_t VERSION_LIMIT = 128;
 inline constexpr size_t IDENTIFIER_LIMIT = 256;
 

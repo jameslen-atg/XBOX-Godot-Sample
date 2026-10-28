@@ -41,25 +41,31 @@ runtime ownership. Use bounded local diagnostics for unexpected errors without
 printing identity values, paths, credentials, or payloads. Disabled consumers and
 missing optional metadata are expected, not failures to retry.
 
-User-supplied provider name: `Microsoft.Gaming.Middleware`, local-capture GUID
-`{FB4DE56A-AB3F-4E6A-8254-DDDCFCC76572}`, informational ETW severity level 4,
+User-supplied provider name: `Microsoft.Gaming.Middleware`, name-derived GUID
+`{D13E8219-218A-51FC-8362-8C90CF602D01}`, informational ETW severity level 4,
 Core event tag `0x00080000` and Critical Data category keyword
 `0x0000800000000000`. Core is not an ETW severity level. These values match
 `MICROSOFT_EVENTTAG_CORE_DATA` and `MICROSOFT_KEYWORD_CRITICAL_DATA` in the
 [public WIL definitions](https://github.com/microsoft/wil/blob/master/include/wil/traceloggingconfig.h).
 They are event metadata, not additional payload fields. Core classification was
 user-directed; it is not a claim of approval or automatic UTC collection.
-No Microsoft provider group or privacy data tag is configured. **Core provider
-registration is not implemented:** the event tag and keyword do not substitute
-for `TraceLoggingOptionWindowsCoreTelemetry()`. Its supported, non-no-op
-definition is still needed; the public WIL definition is intentionally empty
-and must not be used to claim Core registration. Privacy tagging must also be
-reconciled with the current 18-field payload contract before adding standard
-privacy metadata.
-The existing GUID remains project-owned and local-capture-only; an approved GUID
-for this provider name has not been supplied. Neither the name nor the current
-metadata establishes production onboarding. Registering this provider does not
-configure a Windows telemetry upload channel. An authorized ETW consumer must enable it;
+The GUID was selected by the user from the documented ETW provider-name hashing
+method; it is the provider's stable ID, not a Core provider-group ID or an approval.
+
+The user-supplied MIT-licensed `addons\initialization_telemetry\TraceLoggingConfig.h`
+is preserved as the public-build configuration. Provider registration uses its
+`TraceLoggingOptionWindowsCoreTelemetry()` macro and event constants come from
+the same header. **The supplied macro is intentionally empty:** public builds
+remain normal ETW providers with no Microsoft provider-group membership.
+This is the intended OSS stub, not a claim of production Core registration.
+An authorized official build must supply the real configuration through its
+controlled build process; this PR does not implement that private package access
+or pipeline, and the real configuration must not be checked into public source.
+No privacy data tag is emitted. Privacy tagging must be reconciled with the
+current 18-field payload contract before adding standard privacy metadata.
+Neither the name nor the current metadata establishes production onboarding.
+Registering this provider does not configure a Windows telemetry upload channel.
+An authorized ETW consumer must enable it;
 without one, optional metadata is not collected and no event is written.
 
 ## Local eligibility and suppression
@@ -235,7 +241,7 @@ authorized synthetic capture, start a session, unset that variable **only in the
 controlled process environment**, run the game, then stop/decode:
 
 ```powershell
-logman start GodotAddonInit -p "{FB4DE56A-AB3F-4E6A-8254-DDDCFCC76572}" 0x0000800000000000 4 -o .\addon-init.etl -ets
+logman start GodotAddonInit -p "{D13E8219-218A-51FC-8362-8C90CF602D01}" 0x0000800000000000 4 -o .\addon-init.etl -ets
 # Launch the eligible development game here, without RIT_SUPPRESS_TELEMETRY.
 logman stop GodotAddonInit -ets
 tracerpt .\addon-init.etl -o .\addon-init.xml -of XML -y
@@ -291,8 +297,19 @@ public repository content. There is no uploader or remote destination.
   scenarios, and verified the provider name and unchanged schema with Windows
   TDH on four actual events. Validation was narrowed to these native/capture
   checks for the metadata-only rename; no `.gd` edits or live tests.
-- **Still needed for centralized delivery:** approved provider GUID, real Core
-  provider-option definition, collector/transport owner, intended
+- User selected the name-derived provider GUID and supplied the public
+  `TraceLoggingConfig.h` stub. The source now uses its Core provider-option macro
+  and named event constants without adding privacy payload fields. Public builds
+  intentionally remain ordinary local ETW providers; an official-build
+  configuration is a separate controlled input, never a public-source addition.
+  Verified that the stub matches the attachment, then rebuilt Debug/Release and
+  passed both native suites (26 cases / 1816 assertions each), all 34 scope tests
+  and all nine local capture scenarios. TDH verified four actual events under
+  the new GUID with the expected provider name, metadata and 18-field schema.
+  Validation was intentionally narrowed to native/routing/capture checks for
+  this configuration change; no `.gd` edits or live tests.
+- **Still needed for centralized delivery:** authorized official-build
+  configuration/package access and pipeline, collector/transport owner, intended
   destination/table/route, supported release/distribution scope, retention and
   recipients, privacy data tags and required Core/privacy approvals, reporting
   owner and success criteria. No remote delivery is implemented or claimed.
