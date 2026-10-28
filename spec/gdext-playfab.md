@@ -10,7 +10,7 @@ Lobby/matchmaking and Party design work are tracked separately in `spec\gdext-pl
 
 ## Design goals
 
-The shared, not-yet-enabled development initialization telemetry design and its
+The shared local-capture development initialization telemetry design and its
 approval/implementation ledger live in [initialization-telemetry.md](initialization-telemetry.md).
 
 1. **Single root singleton** — expose one `PlayFab` entry point instead of multiple global singletons.

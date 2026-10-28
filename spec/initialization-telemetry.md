@@ -1,7 +1,9 @@
 # SDK component initialization telemetry
 
-Status: **blocked before emitter implementation** on approved provider and event
-metadata. The native addons currently emit no initialization telemetry.
+Status: native local-capture ETW emission implemented for both addons.
+**No central collector, upload route, destination or production classification
+is configured or claimed approved.** The user explicitly authorized a project-owned
+provider for local capture; the RIT runbook is a reference, not a dependency.
 
 This is the shared design for `godot_gdk` and `godot_playfab`. It does not change
 their public initialization API. The design is engine/language neutral; its
@@ -15,7 +17,7 @@ a telemetry framework, spool, upload thread, retry, backfill, or shutdown flush.
 PlayFab must work independently of the GDK addon; each DLL owns its provider and
 loaded-image correlation state.
 
-The proposed event is `SdkComponentInitialized`. It measures successful eligible
+The event is `SdkComponentInitialized`. It measures successful eligible
 development initialization cycles, not attempts, success rates, unique developers,
 devices, installs, or process launches. Count the two components independently.
 A native Gaming Runtime reference acquisition is not another addon success.
@@ -38,6 +40,14 @@ Registration/metadata/write failures cannot change addon success, rollback, or
 runtime ownership. Use bounded local diagnostics for unexpected errors without
 printing identity values, paths, credentials, or payloads. Disabled consumers and
 missing optional metadata are expected, not failures to retry.
+
+Provider: `GodotGamingAddons.Initialization`, GUID
+`{FB4DE56A-AB3F-4E6A-8254-DDDCFCC76572}`, informational level 4, keyword `0x1`.
+It has no Microsoft provider-group or privacy/Core/Critical classification tags.
+The name/GUID are project-owned local-capture identifiers, not placeholders for
+an approved Microsoft provider. Registering this provider does not configure a
+Windows telemetry upload channel. An authorized ETW consumer must enable it;
+without one, optional metadata is not collected and no event is written.
 
 ## Local eligibility and suppression
 
@@ -66,19 +76,21 @@ development evidence even outside an editor-capable engine and without a debug
 feature; classify that case as a development runtime. Package exclusions and
 explicit release/conflicting evidence still suppress.
 
-The private `addons/initialization_telemetry/development_policy.h` implements
-only the pure evidence-to-decision policy. Its enums are **local decisions, not
-approved numeric wire values**. It is currently tested but not yet called by
-either addon; no environment/engine/package collection or event write is enabled.
-Unknown package/engine evidence fails closed, and release evidence cannot be
-overridden by debug/editor/WithOptions evidence.
+The private shared code is compiled separately into each DLL:
+`development_policy.h` contains the pure decision policy,
+`native_telemetry.*` contains Windows identity/correlation/TraceLogging code, and
+`godot_telemetry.*` collects the actual running engine and Gaming Runtime metadata.
+Each successful root initialization calls it before `initialized`. Unknown
+package/engine evidence fails closed, and release evidence cannot be overridden
+by debug/editor/WithOptions evidence. Sequence advancement precedes suppression;
+eligible captured events can therefore have gaps when earlier cycles were suppressed.
 
 Do not query, collect, persist, or use
 `XPackageGetCurrentProcessPackageIdentifier` as a package gate. The isolated
 experiment established that it can succeed in an unpackaged config-backed process;
 its opaque installation/session token is not a PFN.
 
-## Proposed fixed payload
+## Local-capture schema version 1
 
 Exactly 18 payload fields plus the ETW header timestamp. Empty optional strings
 retain the fixed schema. No per-field status/source, package/evidence/path,
@@ -87,22 +99,22 @@ No persistent user/device/install identifiers.
 
 | Field | Native type | Meaning/source |
 | --- | --- | --- |
-| SchemaVersion | UInt32 | Proposed payload revision 1, independent of central contractVersion |
+| SchemaVersion | UInt32 | Payload revision 1 |
 | ComponentId | UnicodeString | `godot_gdk` or `godot_playfab` |
 | ComponentVersion | UnicodeString | Owning addon's plugin.cfg release version, embedded at build time |
-| ComponentKind | UInt32 enum | Engine addon; numeric values require contract freeze |
+| ComponentKind | UInt32 enum | Engine addon = 3; reserved native SDK = 1, managed SDK = 2, language wrapper = 4 |
 | RuntimeSessionId | GUID | Loaded DLL image, not process/user/install identity |
 | InitializationSequence | UInt64 | Successful-cycle number within image |
 | EngineName | UnicodeString | Godot for these emitters |
 | EngineVersion | UnicodeString | Actual calling `Engine::get_version_info()`, not godot-cpp build constants |
 | ExecutionRuntimeName | UnicodeString | Empty; managed/interpreted attribution deferred |
 | ExecutionRuntimeVersion | UnicodeString | Empty; do not infer .NET |
-| GamingRuntimeVersion | UnicodeString | Empty unless a supported actual loaded-runtime source is verified |
+| GamingRuntimeVersion | UnicodeString | XSystemGetRuntimeInfo().runtimeVersion, four decimal components; all-zero result is unavailable |
 | GdkBuildSdkVersion | UnicodeString | Real selected grdk.h macros; never synthesized edition 999999 |
-| DevelopmentContext | UInt32 enum | Editor, editor-runtime run, development run; wire values pending |
+| DevelopmentContext | UInt32 enum | Editor = 1, editor-runtime = 2, development runtime = 3; tooling = 4 is reserved, not emitted |
 | ConfiguredTitlePackageFamilyName | UnicodeString | Explicit valid game config identity, not editor identity |
 | PackagePublisherId | UnicodeString | Windows package publisher ID from configured game PFN |
-| DeviceType | UInt32 enum | XSystemGetDeviceType mapped to PC/Console/Unknown; unknown future values stay Unknown |
+| DeviceType | UInt32 enum | Unknown = 0, PC = 1, Console = 2; XSystemGetDeviceType maps unknown future values to Unknown |
 | XboxTitleId | UnicodeString | XGameGetXboxTitleId as eight uppercase hex digits, else empty |
 | PlayFabTitleId | UnicodeString | Resolved configured PlayFab title ID, else empty |
 
@@ -110,10 +122,14 @@ Underlying PlayFab SDK versions are expressly excluded; SDK HTTP headers already
 provide that attribution outside this event. Keep the addon's ComponentVersion.
 Do not inspect network traffic or investigate another SDK-version field.
 
-Bounds are proposals until owner approval: versions 128 characters, identifiers
-256, enumerated strings 64. Freeze exact encodings, limits, enum values, optionality
-and over-limit handling against the central inventory before implementation.
-Reject unavailable/invalid identities rather than truncate them.
+Lengths are UTF-16 code units, excluding the terminating NUL. Versions are limited
+to 128, component/PlayFab IDs to 256, configured PFN to Windows'
+`PACKAGE_FAMILY_NAME_MAX_LENGTH` (64), package publisher ID to 13, and Xbox title ID
+to exactly eight uppercase hex digits when present. EngineName is fixed `Godot`;
+execution-runtime strings are empty. Reject embedded NUL/control characters and
+invalid surrogate pairs. Invalid optional metadata becomes unavailable, not
+truncated; an invalid required payload suppresses the event with a bounded local
+diagnostic. These local choices still need review for any future production route.
 
 Use `PackageFamilyNameFromId` with explicit valid game config `Identity.Name` and
 `Identity.Publisher`, then `PackageNameAndPublisherIdFromFamilyName` to extract
@@ -122,6 +138,21 @@ No custom hashing, raw publisher DN telemetry, installed-package enumeration,
 editor identity substitution, or new setting before using existing config.
 This is configured identity, not ownership verification; it is not a Partner
 Center seller/organization ID or a PlayFab publisher ID.
+
+For WithOptions, use the actual successfully selected config path preserved by
+the owning runtime across shutdown/reinitialize. For plain initialization, use
+the physical project-root config only when its path is also the executable's
+adjacent `MicrosoftGame.config`; never substitute a Godot editor config.
+Read at most 1 MiB. Windows XmlLite prohibits DTDs, limits nesting to 64 and
+requires an unambiguous direct `Game/Identity` element. Parse the entire document
+before deriving identity. No raw publisher distinguished name or config path
+is emitted. A missing config/identity leaves the two fields empty.
+
+The Gaming Runtime version source is documented by
+[XSystemGetRuntimeInfo](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xsystem/functions/xsystemgetruntimeinfo)
+and [XSystemRuntimeInfo](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xsystem/structs/xsystemruntimeinfo):
+`runtimeVersion` is the runtime service the game is running on; zero means
+unavailable. Do not substitute `availableVersion`, an OS version or a build SDK.
 
 Include grdk.h independently of the existing feature-gate wrappers that synthesize
 999999. Missing or synthetic metadata is unavailable; preserve existing feature
@@ -135,12 +166,9 @@ A forwarding wrapper must not emit a second native initialization event.
 
 ## Plan
 
-1. **Freeze ownership and contract.** Obtain provider headers/README and central
-   rit-events.json; confirm provider name/GUID/group, exact event/keyword/level,
-   privacy/Core-Critical metadata, numeric enums/bounds, target Windows releases,
-   retention, recipient/route/table, purpose and report signals. Keep central
-   contractVersion unchanged until formal release. Review engine-neutral reuse
-   with intended consumers. Do not invent identifiers, approvals or destinations.
+1. **Establish local contract.** Use the project-owned provider and typed schema
+   above for explicitly authorized local capture. Neither `rit-events.json` nor
+   a provider from the source runbook's repository is required.
 2. **Implement and integrate.** Compile a minimal private helper into both DLLs
    without a shared runtime dependency. Preserve initializer evidence and native
    references. Wire owning emitters, registration, cycle state, typed schema,
@@ -152,30 +180,48 @@ A forwarding wrapper must not emit a second native initialization event.
    duplicate calls, rollback, retries, reentrant signals, shutdown/reinitialize,
    duplicate registrations and actual unload/reload. Run the managed headless
    validator for any .gd change. Suppress ordinary test emissions.
-4. **Capture/register.** On an authorized non-retail machine, use supported
-   elevated TRTT for one eligible cycle per addon, inspect all fields/types,
-   compare central inventory, ingest each target Windows release to DataGrid,
-   and retain capture/EDI/release/OS build. Disable Test Mode after capture.
-   Verify DataGrid schema, group, latency/persistence and classifications; only
-   an explicitly supported approved privacy override can explain a difference.
-5. **Approve release.** Record Privacy artifact/STaR disposition and Dr. Isaac
-   exact event/release rows: core_approved=true, compliance_status_flags=0, valid
-   approved privacy tag and is_disallowed=false. Provider filtering is not
-   privacy approval. Third-party addon distribution needs explicit coverage.
-6. **Publish/validate backend.** In the owning telemetry repository, not this
-   addon checkout, use approved Interceptor/Kusto generators and publication
-   runbook. Verify route readback, ADX getschema, current ingestion, coverage,
-   correlation, schema conformance (zero mismatches) and stability interval.
+4. **Capture locally.** Enable this provider with an authorized ETW session, run
+   controlled synthetic addon lifecycle scenarios, stop the session and decode
+   its ETL. Check names/types, counts, session/sequence and truthful metadata.
+   Do not elevate, install/register a package or switch sandbox without permission.
+5. **Choose production collection, if wanted.** Obtain the intended collector,
+   route/destination, retention/recipients, release scope, ownership and applicable
+   privacy/classification decisions. No centralized delivery is implemented.
+   Provider filtering and the user's local-capture approval are not production
+   distribution/privacy approval.
+6. **Onboard the chosen backend.** Follow that pipeline's actual requirements.
+   TRTT/DataGrid, Privacy/STaR, Dr. Isaac and Interceptor/ADX are conditional on
+   selecting that Microsoft pipeline, not universal ETW implementation gates.
+   They remain pending/not performed; do not infer approvals from local capture.
 7. **Reporting/evidence.** Report deduplicated cycles separately from loaded
    images, with unavailable-value rules and distinct Xbox/PlayFab namespaces.
    Validate raw-table agreement, duplicate delivery versus repeat cycles, mixed
-   versions and empty intervals. Confirm dashboard ownership/access; prototype
-   only on owned pages in a clone, never overwrite shared Toolbox pages.
-   Retain source/build/test, capture/DataGrid, approval, publication, ADX and report
-   evidence; update inventory lastReviewed/backendStatus only from actual results.
+   versions and empty intervals. Confirm reporting ownership/access before
+   publishing or changing any dashboard.
+   Retain source/build/test, capture, approval, ingestion and report evidence
+   required by the chosen pipeline. No external inventory is assumed.
 
 No live writes, sandbox switch, package install/registration, machine elevation,
 backend publication or console work is authorized by the current implementation.
+
+## Local capture
+
+Ordinary test/CI execution sets `RIT_SUPPRESS_TELEMETRY=1`. For an explicitly
+authorized synthetic capture, start a session, unset that variable **only in the
+controlled process environment**, run the game, then stop/decode:
+
+```powershell
+logman start GodotAddonInit -p "{FB4DE56A-AB3F-4E6A-8254-DDDCFCC76572}" 0x1 4 -o .\addon-init.etl -ets
+# Launch the eligible development game here, without RIT_SUPPRESS_TELEMETRY.
+logman stop GodotAddonInit -ets
+tracerpt .\addon-init.etl -o .\addon-init.xml -of XML -y
+```
+
+Use a unique session name and stop it in a `finally` block in scripted captures.
+Capture requires the appropriate existing ETW permissions; do not automatically
+elevate or change membership. ETL files include configured identity values and
+ETW header process metadata: handle them as local diagnostic artifacts, not
+public repository content. There is no uploader or remote destination.
 
 ## Progress
 
@@ -185,38 +231,73 @@ backend publication or console work is authorized by the current implementation.
   Synthetic literal config-to-PFN derivation succeeded separately. No actual
   addon, registered/packaged, combined ordering or publisher-extraction controls
   were exercised by that experiment.
-- Local policy foundation: pure suppression/development classification and
-  offline matrix tests added; shared path routed to both addon CI scopes.
-  This is not a production emitter or approved/frozen wire schema.
+- Local policy and native metadata/correlation/provider tests are implemented;
+  shared source paths route to both addon CI scopes and the native test gate.
 - User-directed correction: successful WithOptions also establishes development
   runtime evidence without editor/debug features. The corrected policy passed
-  the Debug and Release native suites below; addon initializer selection remains
-  unchanged.
-- Approved provider definitions/metadata/inventory requested from coordinator.
-  No fake provider, alternate transport, hidden enablement setting or
-  success-shaped no-op emitter has been substituted.
-- Native integration, metadata acquisition, cycle keys, Debug/Release addon and
-  lifecycle verification: pending.
-- TRTT, DataGrid, Privacy/STaR, Dr. Isaac, Interceptor, ADX, reporting and
-  production enablement: **pending, not claimed approved or complete**.
+  the Debug and Release native suites; addon initializer selection remains unchanged.
+- User clarified that `rit-events` is specific to the source repository and
+  approved a project-owned local-capture provider. Native integration, truthful
+  metadata, per-image session/cycle keys and safe provider lifetime are implemented.
+- Actual addon captures verified both combined orders, independent-addon hosts,
+  GDK reentrancy, PlayFab failure/recovery and non-Boolean suppression values.
+  Synthetic configured PFN and Windows publisher-ID extraction were observed on
+  the wire. Windows TDH verified all 18 payload property names and input types.
+- **Still needed for centralized delivery:** collector/transport owner, intended
+  destination/table/route, supported release/distribution scope, retention and
+  recipients, applicable privacy/event classification and approvals, reporting
+  owner and success criteria. No remote delivery is implemented or claimed.
+- TRTT, DataGrid, Privacy/STaR, Dr. Isaac, Interceptor and ADX remain **pending/not
+  performed**, and are relevant only if that specific backend is chosen.
 
-### Local foundation evidence (2026-10-28)
+### Local implementation evidence (2026-10-28)
 
 | Command | Result |
 | --- | --- |
 | `cmake --preset default` | Initially blocked by missing pinned godot-cpp; passed after `git submodule update --init --recursive` restored all three required submodules |
-| `cmake --build --preset debug --target gdk_unit_tests` | Passed |
+| `cmake --build --preset debug --target godot_gdk godot_playfab gdk_unit_tests` | Passed |
 | `cmake --preset default-release` | Passed, separate Release tree |
-| `cmake --build --preset release --target gdk_unit_tests` | Passed |
-| `.\build\bin\Debug\gdk_unit_tests.exe` | 20 cases / 1752 assertions passed |
-| `.\build\release\bin\Release\gdk_unit_tests.exe` | 20 cases / 1752 assertions passed |
+| `cmake --build --preset release --target godot_gdk godot_playfab gdk_unit_tests` | Passed |
+| `.\build\bin\Debug\gdk_unit_tests.exe` | 26 cases / 1817 assertions passed |
+| `.\build\release\bin\Release\gdk_unit_tests.exe` | 26 cases / 1817 assertions passed |
+| `cmake --preset gdk-only` then `cmake --build --preset debug-gdk --target godot_gdk` | Passed, independent GDK Debug |
+| `cmake --preset playfab-only` then `cmake --build --preset debug-playfab --target godot_playfab` | Passed, independent PlayFab Debug |
+| `cmake --preset gdk-only-release` then `cmake --build --preset release-gdk --target godot_gdk` | Passed, independent GDK Release |
+| `cmake --preset playfab-only-release` then `cmake --build --preset release-playfab --target godot_playfab` | Passed, independent PlayFab Release |
 | `node --test .\tools\ci\tests\pr_gate_scope.test.cjs` | 34 tests passed using a checksum-verified portable Node 22 runtime because Node was absent from PATH |
 
 `RIT_SUPPRESS_TELEMETRY=1` was set for configure/build/native test runs.
-The repository orchestrator was intentionally narrowed to the C++ test target
-and routing tests: this change adds no addon runtime integration or public
-behavior. Full addon Debug/Release, independent/combined lifecycle, actual engine
-metadata, process-environment inheritance, registered/packaged gate and capture
-verification remain pending. No `.gd` file was touched, so the GDScript parse
-gate was not required. Live-service tests and live writes were skipped;
-`-Live` and `-AllowLiveWrites` were not used.
+The repository orchestrator was intentionally scoped to the affected GDK and
+PlayFab hosts; GameInput is unchanged. With official Godot 4.6.2 selected using
+`GODOT_CONSOLE`, this command passed:
+
+```powershell
+pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tools\run_all_tests.ps1 -SkipBuild -Hosts tests\godot\gdk,tests\godot\playfab -ParsePaths addons\godot_gdk,addons\godot_playfab,tests\godot\gdk,tests\godot\playfab
+```
+
+The parse gate, native suite and all ten bootstrap runners passed. GDK: 339 tests,
+306 passing/33 pending, 3235 validated assertions, zero failures. PlayFab: 151
+tests, 128 passing/23 pending, 4966 validated assertions, zero failures. Build was
+intentionally skipped in this command because the builds above had completed.
+No repository `.gd` file was changed; parse still ran as part of this scoped run.
+Live-service tests and writes were skipped; neither `-Live` nor
+`-AllowLiveWrites` was used.
+
+Non-elevated local ETW captures used a synthetic config/title and official Godot
+4.6.2. Combined GDK-first and PlayFab-first runs each produced four events;
+GDK reentrant, PlayFab failed-then-successful, GDK-only and PlayFab-only runs each
+produced two. `RIT_SUPPRESS_TELEMETRY` values `0`, `false` and whitespace each
+produced zero. Sequences were 1/2 per component, session GUIDs were stable within
+each image and distinct across components/processes. Captured metadata included
+the actual engine string, running Gaming Runtime version, real `_GRDK_EDITION`
+value, configured PFN/publisher, and canonical Xbox/PlayFab title IDs. ETL and
+the synthetic harness remain local session artifacts, not public source.
+
+Limitations: registered/packaged controls and loose debug/release export controls
+were not executed in this integration run; the package/release exclusion policy
+has offline matrix coverage. Fresh scratch-host editor imports intermittently
+crashed during teardown (including before the XmlLite change); immediate repeated
+imports and all lifecycle scenarios passed. The import crash is unresolved, not
+claimed fixed or conclusively attributed. A first parse attempt using an ambient
+custom Godot 4.5.1 build failed leak-warning checks; the explicit official 4.6.2
+run above passed. Other engine versions and backend delivery remain unverified.

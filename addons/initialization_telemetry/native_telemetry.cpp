@@ -1,0 +1,299 @@
+#include "native_telemetry.h"
+
+#include <appmodel.h>
+#include <winmeta.h>
+#include <TraceLoggingProvider.h>
+#include <objbase.h>
+#include <shlwapi.h>
+#include <xmllite.h>
+#include <wrl/client.h>
+
+#include <limits>
+#include <vector>
+
+namespace initialization_telemetry {
+
+TRACELOGGING_DEFINE_PROVIDER(
+        provider,
+        "GodotGamingAddons.Initialization",
+        (0xfb4de56a, 0xab3f, 0x4e6a, 0x82, 0x54, 0xdd, 0xdc, 0xfc, 0xc7, 0x65, 0x72));
+
+namespace {
+bool registered = false;
+}
+
+HRESULT ImageSession::initialize() {
+    if (initialized) {
+        return S_OK;
+    }
+    const HRESULT result = CoCreateGuid(&id);
+    initialized = SUCCEEDED(result);
+    return result;
+}
+
+bool ImageSession::record_success() {
+    if (!initialized || sequence == std::numeric_limits<uint64_t>::max()) {
+        return false;
+    }
+    ++sequence;
+    return true;
+}
+
+EnvironmentSuppression process_suppression() {
+    wchar_t unused[1]{};
+    SetLastError(ERROR_SUCCESS);
+    const DWORD length = GetEnvironmentVariableW(L"RIT_SUPPRESS_TELEMETRY", unused, 1);
+    if (length != 0) {
+        return EnvironmentSuppression::suppressed;
+    }
+    const DWORD status = GetLastError();
+    return status == ERROR_SUCCESS || status == ERROR_ENVVAR_NOT_FOUND
+            ? EnvironmentSuppression::absent_or_empty
+            : EnvironmentSuppression::unavailable;
+}
+
+PackageIdentity windows_package_identity(LONG &r_status) {
+    UINT32 length = 0;
+    r_status = GetCurrentPackageFamilyName(&length, nullptr);
+    if (r_status == APPMODEL_ERROR_NO_PACKAGE) {
+        return PackageIdentity::unpackaged;
+    }
+    if (r_status != ERROR_INSUFFICIENT_BUFFER || length == 0 || length > PACKAGE_FAMILY_NAME_MAX_LENGTH + 1) {
+        return PackageIdentity::unknown;
+    }
+    std::vector<wchar_t> buffer(length);
+    r_status = GetCurrentPackageFamilyName(&length, buffer.data());
+    if (r_status == APPMODEL_ERROR_NO_PACKAGE) {
+        return PackageIdentity::unpackaged;
+    }
+    return r_status == ERROR_SUCCESS && buffer[0] != L'\0'
+            ? PackageIdentity::packaged
+            : PackageIdentity::unknown;
+}
+
+bool valid_value(std::wstring_view p_value, size_t p_limit) {
+    if (p_value.size() > p_limit) {
+        return false;
+    }
+    for (size_t i = 0; i < p_value.size(); ++i) {
+        const auto value = static_cast<uint16_t>(p_value[i]);
+        if (value < 0x20 || value == 0x7f) {
+            return false;
+        }
+        if (value >= 0xd800 && value <= 0xdbff) {
+            if (++i == p_value.size() || p_value[i] < 0xdc00 || p_value[i] > 0xdfff) {
+                return false;
+            }
+        } else if (value >= 0xdc00 && value <= 0xdfff) {
+            return false;
+        }
+    }
+    return true;
+}
+
+LONG configured_package_identity(std::wstring_view p_name, std::wstring_view p_publisher,
+        std::wstring &r_family, std::wstring &r_publisher_id) {
+    r_family.clear();
+    r_publisher_id.clear();
+    if (p_name.empty() || p_publisher.empty() ||
+            !valid_value(p_name, PACKAGE_NAME_MAX_LENGTH) || !valid_value(p_publisher, 8192)) {
+        return ERROR_INVALID_PARAMETER;
+    }
+    std::wstring name(p_name);
+    std::wstring publisher(p_publisher);
+    PACKAGE_ID identity{};
+    identity.processorArchitecture = PROCESSOR_ARCHITECTURE_NEUTRAL;
+    identity.name = name.data();
+    identity.publisher = publisher.data();
+    UINT32 length = 0;
+    LONG status = PackageFamilyNameFromId(&identity, &length, nullptr);
+    if (status != ERROR_INSUFFICIENT_BUFFER || length == 0 || length > PACKAGE_FAMILY_NAME_MAX_LENGTH + 1) {
+        return status == ERROR_SUCCESS ? ERROR_INVALID_DATA : status;
+    }
+    std::vector<wchar_t> family(length);
+    status = PackageFamilyNameFromId(&identity, &length, family.data());
+    if (status != ERROR_SUCCESS) {
+        return status;
+    }
+
+    UINT32 name_length = 0;
+    UINT32 publisher_length = 0;
+    status = PackageNameAndPublisherIdFromFamilyName(family.data(), &name_length, nullptr, &publisher_length, nullptr);
+    if (status != ERROR_INSUFFICIENT_BUFFER || name_length == 0 || publisher_length == 0 ||
+            name_length > PACKAGE_NAME_MAX_LENGTH + 1 || publisher_length > PACKAGE_PUBLISHERID_MAX_LENGTH + 1) {
+        return status == ERROR_SUCCESS ? ERROR_INVALID_DATA : status;
+    }
+    std::vector<wchar_t> package_name(name_length);
+    std::vector<wchar_t> publisher_id(publisher_length);
+    status = PackageNameAndPublisherIdFromFamilyName(family.data(), &name_length, package_name.data(),
+            &publisher_length, publisher_id.data());
+    if (status == ERROR_SUCCESS) {
+        r_family = family.data();
+        r_publisher_id = publisher_id.data();
+    }
+    return status;
+}
+
+HRESULT configured_identity_from_xml(const uint8_t *p_bytes, size_t p_size,
+        std::wstring &r_family, std::wstring &r_publisher_id) {
+    r_family.clear();
+    r_publisher_id.clear();
+    if (p_bytes == nullptr || p_size == 0 || p_size > 1024 * 1024) {
+        return E_INVALIDARG;
+    }
+    Microsoft::WRL::ComPtr<IStream> stream;
+    stream.Attach(SHCreateMemStream(p_bytes, static_cast<UINT>(p_size)));
+    if (!stream) {
+        return E_OUTOFMEMORY;
+    }
+    Microsoft::WRL::ComPtr<IXmlReader> reader;
+    HRESULT status = CreateXmlReader(IID_PPV_ARGS(reader.GetAddressOf()), nullptr);
+    if (FAILED(status)) {
+        return status;
+    }
+    status = reader->SetProperty(XmlReaderProperty_DtdProcessing, DtdProcessing_Prohibit);
+    if (SUCCEEDED(status)) {
+        status = reader->SetProperty(XmlReaderProperty_MaxElementDepth, 64);
+    }
+    if (SUCCEEDED(status)) {
+        status = reader->SetInput(stream.Get());
+    }
+    if (FAILED(status)) {
+        return status;
+    }
+    bool root = false;
+    bool found = false;
+    std::wstring name;
+    std::wstring publisher;
+    XmlNodeType node;
+    while ((status = reader->Read(&node)) == S_OK) {
+        if (node != XmlNodeType_Element) {
+            continue;
+        }
+        UINT depth = 0;
+        const wchar_t *local_name = nullptr;
+        UINT length = 0;
+        if (FAILED(reader->GetDepth(&depth)) || FAILED(reader->GetLocalName(&local_name, &length))) {
+            return E_FAIL;
+        }
+        const std::wstring_view element(local_name, length);
+        if (depth == 0) {
+            if (root || element != L"Game") {
+                return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+            }
+            root = true;
+        } else if (depth == 1 && element == L"Identity") {
+            if (found) {
+                return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+            }
+            found = true;
+            auto attribute = [&](const wchar_t *p_name, std::wstring &r_value) -> HRESULT {
+                HRESULT result = reader->MoveToAttributeByName(p_name, nullptr);
+                if (result != S_OK) {
+                    return result;
+                }
+                const wchar_t *value = nullptr;
+                UINT size = 0;
+                result = reader->GetValue(&value, &size);
+                if (SUCCEEDED(result)) {
+                    r_value.assign(value, size);
+                }
+                reader->MoveToElement();
+                return result;
+            };
+            const HRESULT name_status = attribute(L"Name", name);
+            const HRESULT publisher_status = attribute(L"Publisher", publisher);
+            if (FAILED(name_status) || FAILED(publisher_status)) {
+                return E_FAIL;
+            }
+        }
+    }
+    if (FAILED(status)) {
+        return status;
+    }
+    if (!root || !found || name.empty() || publisher.empty()) {
+        return S_FALSE;
+    }
+    return HRESULT_FROM_WIN32(configured_package_identity(name, publisher, r_family, r_publisher_id));
+}
+
+DevelopmentContext development_context(DevelopmentDecision p_decision) {
+    switch (p_decision) {
+        case DevelopmentDecision::editor: return DevelopmentContext::editor;
+        case DevelopmentDecision::editor_runtime: return DevelopmentContext::editor_runtime;
+        case DevelopmentDecision::development_runtime: return DevelopmentContext::development_runtime;
+        default: return DevelopmentContext::unknown;
+    }
+}
+
+bool valid_payload(const EventPayload &p) {
+    if (p.component_id.empty() || p.component_version.empty() ||
+            !valid_value(p.component_id, IDENTIFIER_LIMIT) || !valid_value(p.component_version, VERSION_LIMIT) ||
+            !valid_value(p.engine_version, VERSION_LIMIT) || !valid_value(p.gaming_runtime_version, VERSION_LIMIT) ||
+            !valid_value(p.gdk_build_sdk_version, VERSION_LIMIT) ||
+            !valid_value(p.configured_title_package_family_name, PACKAGE_FAMILY_NAME_MAX_LENGTH) ||
+            !valid_value(p.package_publisher_id, PACKAGE_PUBLISHERID_MAX_LENGTH) ||
+            !valid_value(p.playfab_title_id, IDENTIFIER_LIMIT) ||
+            p.development_context < DevelopmentContext::editor ||
+            p.development_context > DevelopmentContext::development_runtime ||
+            p.device_type > DeviceType::console) {
+        return false;
+    }
+    if (!p.xbox_title_id.empty()) {
+        if (p.xbox_title_id.size() != 8) {
+            return false;
+        }
+        for (const wchar_t value : p.xbox_title_id) {
+            if (!(value >= L'0' && value <= L'9') && !(value >= L'A' && value <= L'F')) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+ULONG register_provider() {
+    if (registered) {
+        return ERROR_SUCCESS;
+    }
+    const ULONG status = TraceLoggingRegister(provider);
+    registered = status == ERROR_SUCCESS;
+    return status;
+}
+
+void unregister_provider() {
+    if (registered) {
+        TraceLoggingUnregister(provider);
+        registered = false;
+    }
+}
+
+bool provider_enabled() {
+    return registered && TraceLoggingProviderEnabled(provider, WINEVENT_LEVEL_INFO, INITIALIZATION_KEYWORD);
+}
+
+void write_initialized(const ImageSession &p_session, const EventPayload &p) {
+    TraceLoggingWrite(provider, "SdkComponentInitialized",
+            TraceLoggingLevel(WINEVENT_LEVEL_INFO),
+            TraceLoggingKeyword(INITIALIZATION_KEYWORD),
+            TraceLoggingUInt32(1, "SchemaVersion"),
+            TraceLoggingWideString(p.component_id.c_str(), "ComponentId"),
+            TraceLoggingWideString(p.component_version.c_str(), "ComponentVersion"),
+            TraceLoggingUInt32(static_cast<uint32_t>(ComponentKind::engine_addon), "ComponentKind"),
+            TraceLoggingGuid(p_session.get_id(), "RuntimeSessionId"),
+            TraceLoggingUInt64(p_session.get_sequence(), "InitializationSequence"),
+            TraceLoggingWideString(L"Godot", "EngineName"),
+            TraceLoggingWideString(p.engine_version.c_str(), "EngineVersion"),
+            TraceLoggingWideString(L"", "ExecutionRuntimeName"),
+            TraceLoggingWideString(L"", "ExecutionRuntimeVersion"),
+            TraceLoggingWideString(p.gaming_runtime_version.c_str(), "GamingRuntimeVersion"),
+            TraceLoggingWideString(p.gdk_build_sdk_version.c_str(), "GdkBuildSdkVersion"),
+            TraceLoggingUInt32(static_cast<uint32_t>(p.development_context), "DevelopmentContext"),
+            TraceLoggingWideString(p.configured_title_package_family_name.c_str(), "ConfiguredTitlePackageFamilyName"),
+            TraceLoggingWideString(p.package_publisher_id.c_str(), "PackagePublisherId"),
+            TraceLoggingUInt32(static_cast<uint32_t>(p.device_type), "DeviceType"),
+            TraceLoggingWideString(p.xbox_title_id.c_str(), "XboxTitleId"),
+            TraceLoggingWideString(p.playfab_title_id.c_str(), "PlayFabTitleId"));
+}
+
+} // namespace initialization_telemetry

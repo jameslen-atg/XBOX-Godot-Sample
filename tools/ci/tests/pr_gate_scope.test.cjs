@@ -60,14 +60,16 @@ test('GameInput change selects only GameInput', () => {
   assert.deepEqual(r.parse.paths, scope.PARSE_SCOPES.gameinput.slice().sort());
 });
 
-test('shared initialization telemetry selects both owners and native policy tests', () => {
-  const r = classify('addons/initialization_telemetry/development_policy.h');
-  assert.deepEqual(r.components, ['gdk', 'playfab']);
-  assert.equal(r.doctest, true);
-  assert.equal(r.full, false);
-  assert.equal(r.editortools, false);
-  assert.deepEqual(r.fuzz_targets, []);
-  assert.deepEqual(r.fallback, []);
+test('shared initialization telemetry selects both owners and native tests', () => {
+  for (const file of ['development_policy.h', 'native_telemetry.cpp', 'godot_telemetry.cpp']) {
+    const r = classify(`addons/initialization_telemetry/${file}`);
+    assert.deepEqual(r.components, ['gdk', 'playfab']);
+    assert.equal(r.doctest, true);
+    assert.equal(r.full, false);
+    assert.equal(r.editortools, false);
+    assert.deepEqual(r.fuzz_targets, []);
+    assert.deepEqual(r.fallback, []);
+  }
   const suite = classify('tests/cpp/initialization_telemetry/test_development_policy.cpp');
   assert.equal(suite.doctest, true);
   assert.equal(suite.full, false);

@@ -38,6 +38,7 @@ const DOCTEST_PRODUCTION_SOURCES = [
   'addons/godot_gdk/src/xbox_result_codes_internal',
   'addons/godot_playfab/src/playfab_result_codes_internal',
   'addons/godot_playfab/src/playfab_request_key',
+  'addons/initialization_telemetry/native_telemetry',
 ];
 
 // Production sources (and their headers) -> fuzz targets that compile them,
@@ -204,7 +205,7 @@ const RULES = [
 
   // Repo-wide native build inputs: conservative full fan-out.
   {
-    name: 'shared initialization telemetry policy',
+    name: 'shared initialization telemetry',
     kind: 'specific',
     test: pre('addons/initialization_telemetry/'),
     apply: (sel) => {
