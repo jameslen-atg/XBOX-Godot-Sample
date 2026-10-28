@@ -69,6 +69,8 @@ Lessons that have cost rework in past sessions. Apply them as starting assumptio
   Do not repurpose `GDK.events`, add a singleton, or collect installation tokens.
   Follow `spec\initialization-telemetry.md`; ordinary tests must suppress collection
   with nonempty process-environment `RIT_SUPPRESS_TELEMETRY`.
+  Emit initialization success only, never shutdown events. Keep telemetry
+  documentation out of `doc_classes\*.xml`; use the shared spec and Markdown docs.
 
 - Public Godot-facing classes in `godot_gdk` should have matching documentation under `addons\godot_gdk\doc_classes\`.
 - When public methods, properties, signals, enums, or behavior change, update the relevant `doc_classes\*.xml` in the same change.

@@ -172,8 +172,10 @@ A forwarding wrapper must not emit a second native initialization event.
 2. **Implement and integrate.** Compile a minimal private helper into both DLLs
    without a shared runtime dependency. Preserve initializer evidence and native
    references. Wire owning emitters, registration, cycle state, typed schema,
-   truthful metadata and CMake versions/libraries. Update root doc_classes, addon
-   docs/specs, scoped instructions, sample guidance and tests in the same change.
+   truthful metadata and CMake versions/libraries. Update Markdown addon docs/specs,
+   scoped instructions, sample guidance and tests in the same change. Telemetry
+   does not belong in XML class docs. Emit no shutdown event; provider teardown
+   only unregisters the handle, without writing or flushing.
 3. **Verify source locally.** In runbook order: review exact contract, Debug build,
    separate-tree Release build, then targeted native and offline tests. Build
    GDK-only and PlayFab-only configurations and cover both combined init orders,

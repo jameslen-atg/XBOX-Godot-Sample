@@ -84,6 +84,8 @@ cd tests\godot\playfab
   Follow `spec\initialization-telemetry.md`; ordinary tests must suppress collection
   with nonempty process-environment `RIT_SUPPRESS_TELEMETRY`. Do not add a PlayFab
   analytics dependency, SDK-version fields, managed attribution or a new singleton.
+  Emit initialization success only, never shutdown events. Keep telemetry
+  documentation out of `doc_classes\*.xml`; use the shared spec and Markdown docs.
 
 - Public Godot-facing class docs live in `addons\godot_playfab\doc_classes\`.
 - `docs\playfab\plugin.md` is the user-facing addon overview. Update it when the public surface or sample workflow changes.
