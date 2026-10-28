@@ -2,7 +2,6 @@
 #include "doctest.h"
 
 #include <vector>
-#include <cstring>
 
 using namespace initialization_telemetry;
 
@@ -85,39 +84,6 @@ TEST_CASE("telemetry payload rejects oversized, malformed Unicode and noncanonic
     payload.xbox_title_id.clear();
     payload.component_version.assign(VERSION_LIMIT + 1, L'v');
     CHECK_FALSE(valid_payload(payload));
-}
-
-TEST_CASE("configured identity XML is bounded and rejects malformed or ambiguous configuration") {
-    std::wstring family;
-    std::wstring publisher;
-    auto parse = [&](const char *p_xml) {
-        return configured_identity_from_xml(reinterpret_cast<const uint8_t *>(p_xml),
-                std::strlen(p_xml), family, publisher);
-    };
-    REQUIRE(parse("<Game><Identity Name=\"Telemetry.Synthetic\" Publisher=\"CN=Synthetic\" /></Game>\r\n") == S_OK);
-    CHECK_FALSE(family.empty());
-    CHECK(publisher.size() == 13);
-    CHECK(FAILED(parse("<Game><Identity Name=\"Telemetry.Synthetic\" Publisher=\"CN=Synthetic\" /></Bad>")));
-    CHECK(family.empty());
-    CHECK(publisher.empty());
-    CHECK(FAILED(parse("<Game><Identity Name=\"First\" Publisher=\"CN=Synthetic\" />"
-                       "<Identity Name=\"Second\" Publisher=\"CN=Synthetic\" /></Game>")));
-    CHECK(FAILED(parse("<!DOCTYPE Game [<!ENTITY x \"Synthetic\">]><Game />")));
-    CHECK(parse("<Game />") == S_FALSE);
-    CHECK(parse("<Game><Identity Name=\"Telemetry.Synthetic\" /></Game>") == S_FALSE);
-    CHECK(FAILED(parse("<Other><Identity Name=\"Telemetry.Synthetic\" Publisher=\"CN=Synthetic\" /></Other>")));
-    const std::string oversized(1024 * 1024 + 1, ' ');
-    CHECK(FAILED(parse(oversized.c_str())));
-    std::string nested = "<Game>";
-    for (int i = 0; i < 65; ++i) {
-        nested += "<Nested>";
-    }
-    for (int i = 0; i < 65; ++i) {
-        nested += "</Nested>";
-    }
-    nested += "</Game>";
-    CHECK(FAILED(parse(nested.c_str())));
-    CHECK(FAILED(configured_identity_from_xml(nullptr, 0, family, publisher)));
 }
 
 TEST_CASE("local telemetry provider registration is idempotent and can be safely torn down") {

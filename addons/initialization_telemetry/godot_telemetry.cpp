@@ -14,6 +14,7 @@
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
+#include <godot_cpp/classes/xml_parser.hpp>
 #include <godot_cpp/core/error_macros.hpp>
 
 #include <cwchar>
@@ -71,10 +72,32 @@ void collect_configured_identity(const godot::String &p_selected_path, EventPayl
         return;
     }
     const PackedByteArray bytes = file->get_buffer(file->get_length());
-    const HRESULT identity_status = configured_identity_from_xml(bytes.ptr(), bytes.size(),
-            r_payload.configured_title_package_family_name, r_payload.package_publisher_id);
-    if (FAILED(identity_status)) {
-        diagnostic("Configured package identity could not be derived; identity fields are unavailable.");
+    Ref<XMLParser> parser;
+    parser.instantiate();
+    if (parser->open_buffer(bytes) != OK) {
+        diagnostic("Game config identity could not be parsed; identity fields are unavailable.");
+        return;
+    }
+    // Gaming Runtime already accepted the config; only extract identity metadata.
+    Error status;
+    while ((status = parser->read()) == OK) {
+        if (parser->get_node_type() != XMLParser::NODE_ELEMENT || parser->get_node_name() != "Identity") {
+            continue;
+        }
+        const String name = parser->get_named_attribute_value_safe("Name");
+        const String publisher = parser->get_named_attribute_value_safe("Publisher");
+        if (name.is_empty() || publisher.is_empty()) {
+            return;
+        }
+        const LONG identity_status = configured_package_identity(wide(name), wide(publisher),
+                r_payload.configured_title_package_family_name, r_payload.package_publisher_id);
+        if (identity_status != ERROR_SUCCESS) {
+            diagnostic("Configured package identity could not be derived; identity fields are unavailable.");
+        }
+        return;
+    }
+    if (status != ERR_FILE_EOF) {
+        diagnostic("Game config identity could not be parsed; identity fields are unavailable.");
     }
 }
 

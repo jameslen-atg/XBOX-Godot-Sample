@@ -4,9 +4,6 @@
 #include <winmeta.h>
 #include <TraceLoggingProvider.h>
 #include <objbase.h>
-#include <shlwapi.h>
-#include <xmllite.h>
-#include <wrl/client.h>
 
 #include <limits>
 #include <vector>
@@ -132,89 +129,6 @@ LONG configured_package_identity(std::wstring_view p_name, std::wstring_view p_p
         r_publisher_id = publisher_id.data();
     }
     return status;
-}
-
-HRESULT configured_identity_from_xml(const uint8_t *p_bytes, size_t p_size,
-        std::wstring &r_family, std::wstring &r_publisher_id) {
-    r_family.clear();
-    r_publisher_id.clear();
-    if (p_bytes == nullptr || p_size == 0 || p_size > 1024 * 1024) {
-        return E_INVALIDARG;
-    }
-    Microsoft::WRL::ComPtr<IStream> stream;
-    stream.Attach(SHCreateMemStream(p_bytes, static_cast<UINT>(p_size)));
-    if (!stream) {
-        return E_OUTOFMEMORY;
-    }
-    Microsoft::WRL::ComPtr<IXmlReader> reader;
-    HRESULT status = CreateXmlReader(IID_PPV_ARGS(reader.GetAddressOf()), nullptr);
-    if (FAILED(status)) {
-        return status;
-    }
-    status = reader->SetProperty(XmlReaderProperty_DtdProcessing, DtdProcessing_Prohibit);
-    if (SUCCEEDED(status)) {
-        status = reader->SetProperty(XmlReaderProperty_MaxElementDepth, 64);
-    }
-    if (SUCCEEDED(status)) {
-        status = reader->SetInput(stream.Get());
-    }
-    if (FAILED(status)) {
-        return status;
-    }
-    bool root = false;
-    bool found = false;
-    std::wstring name;
-    std::wstring publisher;
-    XmlNodeType node;
-    while ((status = reader->Read(&node)) == S_OK) {
-        if (node != XmlNodeType_Element) {
-            continue;
-        }
-        UINT depth = 0;
-        const wchar_t *local_name = nullptr;
-        UINT length = 0;
-        if (FAILED(reader->GetDepth(&depth)) || FAILED(reader->GetLocalName(&local_name, &length))) {
-            return E_FAIL;
-        }
-        const std::wstring_view element(local_name, length);
-        if (depth == 0) {
-            if (root || element != L"Game") {
-                return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-            }
-            root = true;
-        } else if (depth == 1 && element == L"Identity") {
-            if (found) {
-                return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-            }
-            found = true;
-            auto attribute = [&](const wchar_t *p_name, std::wstring &r_value) -> HRESULT {
-                HRESULT result = reader->MoveToAttributeByName(p_name, nullptr);
-                if (result != S_OK) {
-                    return result;
-                }
-                const wchar_t *value = nullptr;
-                UINT size = 0;
-                result = reader->GetValue(&value, &size);
-                if (SUCCEEDED(result)) {
-                    r_value.assign(value, size);
-                }
-                reader->MoveToElement();
-                return result;
-            };
-            const HRESULT name_status = attribute(L"Name", name);
-            const HRESULT publisher_status = attribute(L"Publisher", publisher);
-            if (FAILED(name_status) || FAILED(publisher_status)) {
-                return E_FAIL;
-            }
-        }
-    }
-    if (FAILED(status)) {
-        return status;
-    }
-    if (!root || !found || name.empty() || publisher.empty()) {
-        return S_FALSE;
-    }
-    return HRESULT_FROM_WIN32(configured_package_identity(name, publisher, r_family, r_publisher_id));
 }
 
 DevelopmentContext development_context(DevelopmentDecision p_decision) {

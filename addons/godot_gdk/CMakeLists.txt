@@ -68,8 +68,6 @@ target_link_libraries(godot_gdk PRIVATE
     windowsapp
     advapi32
     ole32
-    xmllite
-    shlwapi
 )
 
 godot_cpp_config_guard(godot_gdk)

@@ -143,10 +143,13 @@ For WithOptions, use the actual successfully selected config path preserved by
 the owning runtime across shutdown/reinitialize. For plain initialization, use
 the physical project-root config only when its path is also the executable's
 adjacent `MicrosoftGame.config`; never substitute a Godot editor config.
-Read at most 1 MiB. Windows XmlLite prohibits DTDs, limits nesting to 64 and
-requires an unambiguous direct `Game/Identity` element. Parse the entire document
-before deriving identity. No raw publisher distinguished name or config path
-is emitted. A missing config/identity leaves the two fields empty.
+Read at most 1 MiB after successful Gaming Runtime and addon initialization.
+Reuse Godot's `XMLParser` to extract `Identity.Name` and `Identity.Publisher`,
+then stop. This is metadata extraction from an already accepted config, not a
+second schema validator; no separate XML library is needed. Reading/parsing
+remains best-effort if the file becomes unavailable or changes after runtime
+initialization. No raw publisher distinguished name or config path is emitted.
+A missing config/identity leaves the two fields empty.
 
 The Gaming Runtime version source is documented by
 [XSystemGetRuntimeInfo](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xsystem/functions/xsystemgetruntimeinfo)
@@ -245,6 +248,11 @@ public repository content. There is no uploader or remote destination.
   GDK reentrancy, PlayFab failure/recovery and non-Boolean suppression values.
   Synthetic configured PFN and Windows publisher-ID extraction were observed on
   the wire. Windows TDH verified all 18 payload property names and input types.
+- User-directed simplification: use Godot's existing XML parser only after
+  successful runtime initialization, without duplicating config schema validation.
+  Removed XmlLite, Shlwapi and the native XML-validation helper/tests. Repeated
+  the capture matrix with the Godot parser, including the trailing-whitespace
+  config that exposed the earlier traversal issue; identity fields remain correct.
 - **Still needed for centralized delivery:** collector/transport owner, intended
   destination/table/route, supported release/distribution scope, retention and
   recipients, applicable privacy/event classification and approvals, reporting
@@ -260,8 +268,8 @@ public repository content. There is no uploader or remote destination.
 | `cmake --build --preset debug --target godot_gdk godot_playfab gdk_unit_tests` | Passed |
 | `cmake --preset default-release` | Passed, separate Release tree |
 | `cmake --build --preset release --target godot_gdk godot_playfab gdk_unit_tests` | Passed |
-| `.\build\bin\Debug\gdk_unit_tests.exe` | 26 cases / 1817 assertions passed |
-| `.\build\release\bin\Release\gdk_unit_tests.exe` | 26 cases / 1817 assertions passed |
+| `.\build\bin\Debug\gdk_unit_tests.exe` | 25 cases / 1803 assertions passed |
+| `.\build\release\bin\Release\gdk_unit_tests.exe` | 25 cases / 1803 assertions passed |
 | `cmake --preset gdk-only` then `cmake --build --preset debug-gdk --target godot_gdk` | Passed, independent GDK Debug |
 | `cmake --preset playfab-only` then `cmake --build --preset debug-playfab --target godot_playfab` | Passed, independent PlayFab Debug |
 | `cmake --preset gdk-only-release` then `cmake --build --preset release-gdk --target godot_gdk` | Passed, independent GDK Release |
@@ -298,7 +306,7 @@ the synthetic harness remain local session artifacts, not public source.
 Limitations: registered/packaged controls and loose debug/release export controls
 were not executed in this integration run; the package/release exclusion policy
 has offline matrix coverage. Fresh scratch-host editor imports intermittently
-crashed during teardown (including before the XmlLite change); immediate repeated
+crashed during teardown (including before the parser replacement); immediate repeated
 imports and all lifecycle scenarios passed. The import crash is unresolved, not
 claimed fixed or conclusively attributed. A first parse attempt using an ambient
 custom Godot 4.5.1 build failed leak-warning checks; the explicit official 4.6.2
