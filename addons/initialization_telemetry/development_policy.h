@@ -57,7 +57,7 @@ constexpr DevelopmentDecision classify_development(const DevelopmentEvidence &p_
     if (p_evidence.release_feature) {
         return development_evidence ? DevelopmentDecision::conflicting : DevelopmentDecision::release;
     }
-    if ((p_evidence.editor_hint || p_evidence.initialized_with_options) && !p_evidence.editor_feature) {
+    if (p_evidence.editor_hint && !p_evidence.editor_feature) {
         return DevelopmentDecision::conflicting;
     }
     if (p_evidence.editor_hint) {
@@ -66,7 +66,7 @@ constexpr DevelopmentDecision classify_development(const DevelopmentEvidence &p_
     if (p_evidence.editor_feature) {
         return DevelopmentDecision::editor_runtime;
     }
-    if (p_evidence.debug_feature) {
+    if (p_evidence.debug_feature || p_evidence.initialized_with_options) {
         return DevelopmentDecision::development_runtime;
     }
     return DevelopmentDecision::unavailable;

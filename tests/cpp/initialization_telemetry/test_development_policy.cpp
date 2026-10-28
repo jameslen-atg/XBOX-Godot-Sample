@@ -41,7 +41,7 @@ TEST_CASE("initialization telemetry requires positive development evidence") {
     evidence.editor_hint = false;
     CHECK(classify_development(evidence) == DevelopmentDecision::editor_runtime);
     evidence.editor_feature = false;
-    CHECK(classify_development(evidence) == DevelopmentDecision::conflicting);
+    CHECK(classify_development(evidence) == DevelopmentDecision::development_runtime);
     evidence.initialized_with_options = false;
     evidence.editor_hint = true;
     CHECK(classify_development(evidence) == DevelopmentDecision::conflicting);
@@ -80,9 +80,9 @@ TEST_CASE("initialization telemetry packaging exclusions dominate every developm
 
 TEST_CASE("initialization telemetry WithOptions cannot bypass unknown or release evidence") {
     auto evidence = unpackaged_debug();
-    evidence.editor_feature = true;
+    evidence.debug_feature = false;
     evidence.initialized_with_options = true;
-    CHECK(is_eligible(classify_development(evidence)));
+    CHECK(classify_development(evidence) == DevelopmentDecision::development_runtime);
     evidence.windows_package = PackageIdentity::unknown;
     CHECK_FALSE(is_eligible(classify_development(evidence)));
     evidence.windows_package = PackageIdentity::unpackaged;

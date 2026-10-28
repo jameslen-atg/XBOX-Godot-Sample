@@ -61,7 +61,10 @@ running engine's debug/release features for exports, not the addon's `_DEBUG`.
 Editor feature evidence does not establish a parent/launcher relationship.
 Keep the actual successful WithOptions selection across reused native runtime
 references; do not infer it from current config presence or change initializer
-selection for telemetry.
+selection for telemetry. Successful WithOptions initialization is positive
+development evidence even outside an editor-capable engine and without a debug
+feature; classify that case as a development runtime. Package exclusions and
+explicit release/conflicting evidence still suppress.
 
 The private `addons/initialization_telemetry/development_policy.h` implements
 only the pure evidence-to-decision policy. Its enums are **local decisions, not
@@ -185,6 +188,10 @@ backend publication or console work is authorized by the current implementation.
 - Local policy foundation: pure suppression/development classification and
   offline matrix tests added; shared path routed to both addon CI scopes.
   This is not a production emitter or approved/frozen wire schema.
+- User-directed correction: successful WithOptions also establishes development
+  runtime evidence without editor/debug features. The corrected policy passed
+  the Debug and Release native suites below; addon initializer selection remains
+  unchanged.
 - Approved provider definitions/metadata/inventory requested from coordinator.
   No fake provider, alternate transport, hidden enablement setting or
   success-shaped no-op emitter has been substituted.
