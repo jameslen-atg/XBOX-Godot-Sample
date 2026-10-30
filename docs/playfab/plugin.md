@@ -6,6 +6,22 @@ This is the landing page for the `godot_playfab` docs set.
 
 ## Current implementation status
 
+Successful unpackaged development initialization can emit a local ETW
+`SdkComponentInitialized` event through the user-named
+`Microsoft.Gaming.Middleware` provider using its local-capture GUID, only when an ETW consumer enables it.
+PlayFab counts its own successful cycles independently of GDK. Packaged and
+release games are excluded; any nonempty process `RIT_SUPPRESS_TELEMETRY` value
+suppresses collection. This is native ETW, not PlayFab analytics, and no uploader
+or cloud destination is configured. See the [schema, capture steps and pending
+production decisions](../../spec/initialization-telemetry.md).
+The event contains 18 application fields plus the standard
+`PartA_PrivTags` UInt64 usage classification; no new identity fields are added.
+Configured PFN/publisher metadata comes from the successful WithOptions
+initialization's selected config, or the physical `MicrosoftGame.config` beside
+an unpackaged development export. Packed resource-root resolution is not used to
+locate that physical file; missing config identity still leaves both metadata
+fields empty.
+
 ### Implemented now
 
 - abstract root singleton registration through `PlayFab`
