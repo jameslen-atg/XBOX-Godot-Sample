@@ -59,9 +59,7 @@ is preserved as the public-build configuration. Provider registration uses its
 the same header. **The supplied macro is intentionally empty:** public builds
 remain normal ETW providers with no Microsoft provider-group membership.
 This is the intended OSS stub, not a claim of production Core registration.
-An authorized official build must supply the real configuration through its
-controlled build process; this PR does not implement that private package access
-or pipeline, and the real configuration must not be checked into public source.
+Public builds use only this stub; they do not enable centralized collection.
 The standard `TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage)` adds
 `PartA_PrivTags` as UInt64 with value `0x0000000002000000`. The owner confirmed
 that formal privacy review is complete and the existing collected IDs are
@@ -173,9 +171,13 @@ This is configured identity, not ownership verification; it is not a Partner
 Center seller/organization ID or a PlayFab publisher ID.
 
 For WithOptions, use the actual successfully selected config path preserved by
-the owning runtime across shutdown/reinitialize. For plain initialization, use
-the physical project-root config only when its path is also the executable's
-adjacent `MicrosoftGame.config`; never substitute a Godot editor config.
+the owning runtime across shutdown/reinitialize. For plain initialization in a
+non-editor engine, use the physical `MicrosoftGame.config` beside the executable.
+Do not compare this absolute path with `ProjectSettings.globalize_path("res://...")`:
+a packed project's resource root can globalize to a relative path. Never fall
+back to a Godot editor executable's config when no successful WithOptions path
+was retained. `gdk/packaging/game_config_dir` selects the source config for the
+PC exporter to stage; it is not an exported game's runtime lookup directory.
 Read at most 1 MiB after successful Gaming Runtime and addon initialization.
 Reuse Godot's `XMLParser` to extract `Identity.Name` and `Identity.Publisher`,
 then stop. This is metadata extraction from an already accepted config, not a
@@ -224,8 +226,7 @@ provide an initialization success rate without a separate attempt denominator.
 ## Plan
 
 1. **Establish local contract.** Use the project-owned provider and typed schema
-   above for explicitly authorized local capture. Neither `rit-events.json` nor
-   a provider from the source runbook's repository is required.
+   above for explicitly authorized local capture.
 2. **Implement and integrate.** Compile a minimal private helper into both DLLs
    without a shared runtime dependency. Preserve initializer evidence and native
    references. Wire owning emitters, registration, cycle state, typed schema,
@@ -233,7 +234,7 @@ provide an initialization success rate without a separate attempt denominator.
    scoped instructions, sample guidance and tests in the same change. Telemetry
    does not belong in XML class docs. Emit no shutdown event; provider teardown
    only unregisters the handle, without writing or flushing.
-3. **Verify source locally.** In runbook order: review exact contract, Debug build,
+3. **Verify source locally.** Review the exact contract, Debug build,
    separate-tree Release build, then relevant existing native/offline tests.
    For metadata-only follow-ups, narrow validation to the existing native suites
    and a controlled capture of both addons. Do not add a regression harness,
@@ -244,30 +245,10 @@ provide an initialization success rate without a separate attempt denominator.
    controlled synthetic addon lifecycle scenarios, stop the session and decode
    its ETL. Check names/types, counts, session/sequence and truthful metadata.
    Do not elevate, install/register a package or switch sandbox without permission.
-5. **Choose production collection, if wanted.** Obtain the intended collector,
-   route/destination, retention/recipients, release scope, ownership and any
-   required pipeline/release authorizations for the requested Core classification.
-   The privacy category and 19-field shape are selected; formal privacy review
-   is owner-confirmed complete, not a pending implementation prerequisite.
-   No centralized delivery is implemented.
-   Provider filtering and the user's local-capture approval are not production
-   distribution authorization.
-6. **Onboard the chosen backend.** Follow that pipeline's actual requirements.
-   TRTT/DataGrid, Privacy/STaR, Dr. Isaac and Interceptor/ADX are conditional on
-   selecting that Microsoft pipeline, not universal ETW implementation gates.
-   This implementation performs no backend onboarding; local capture does not
-   establish backend activation. The existing completed privacy review is not
-   an open work item.
-7. **Reporting/evidence.** Report deduplicated cycles separately from loaded
-   images, with unavailable-value rules and distinct Xbox/PlayFab namespaces.
-   Validate raw-table agreement, duplicate delivery versus repeat cycles, mixed
-   versions and empty intervals. Confirm reporting ownership/access before
-   publishing or changing any dashboard.
-   Retain source/build/test, capture, approval, ingestion and report evidence
-   required by the chosen pipeline. No external inventory is assumed.
 
 No live writes, sandbox switch, package install/registration, machine elevation,
 backend publication or console work is authorized by the current implementation.
+Centralized collection and reporting are outside this public implementation.
 
 ## Local capture
 
@@ -301,8 +282,7 @@ public repository content. There is no uploader or remote destination.
 - User-directed correction: successful WithOptions also establishes development
   runtime evidence without editor/debug features. The corrected policy passed
   the Debug and Release native suites; addon initializer selection remains unchanged.
-- User clarified that `rit-events` is specific to the source repository and
-  approved a project-owned local-capture provider. Native integration, truthful
+- A project-owned local-capture provider is implemented. Native integration, truthful
   metadata, per-image session/cycle keys and safe provider lifetime are implemented.
 - Actual addon captures verified both combined orders, independent-addon hosts,
   GDK reentrancy, PlayFab failure/recovery and non-Boolean suppression values.
@@ -335,8 +315,7 @@ public repository content. There is no uploader or remote destination.
 - User selected the name-derived provider GUID and supplied the public
   `TraceLoggingConfig.h` stub. The source now uses its Core provider-option macro
   and named event constants without adding privacy payload fields. Public builds
-  intentionally remain ordinary local ETW providers; an official-build
-  configuration is a separate controlled input, never a public-source addition.
+  intentionally remain ordinary local ETW providers.
   Verified that the stub matches the attachment, then rebuilt Debug/Release and
   passed both native suites (26 cases / 1816 assertions each), all 34 scope tests
   and all nine local capture scenarios. TDH verified four actual events under
@@ -357,16 +336,24 @@ public repository content. There is no uploader or remote destination.
   No `.gd` file changed, so the parse gate was not repeated. The offline
   orchestrator was intentionally narrowed to the existing native suites and
   this wire check; no live tests or writes were enabled.
-- **Still needed for centralized delivery:** authorized official-build
-  configuration/package access and pipeline, collector/transport owner, intended
-  destination/table/route, supported release/distribution scope, retention and
-  recipients, any remaining pipeline/release authorizations, reporting
-  owner and success criteria. No remote delivery is implemented or claimed.
-- No TRTT, DataGrid, Privacy/STaR, Dr. Isaac, Interceptor or ADX onboarding was
-  performed by this implementation. Backend-specific registration remains
-  separate from the owner's already completed privacy review.
+- Public builds use the OSS stub and do not implement centralized delivery.
 
 ### Local implementation evidence (2026-10-28)
+
+Follow-up local verification (2026-10-30): NetRumble's standalone Debug export
+exposed a relative packed-project resource root, which made the old config-path
+equality check skip PFN/publisher metadata. Plain initialization in a non-editor
+engine now reads the physical executable-adjacent config directly; the selected
+WithOptions path and no-editor-identity fallback rule are preserved.
+Both Debug addons were rebuilt and the existing native suite passed (26 cases,
+1816 assertions). The user confirmed in Trace Viewer++ that the refreshed
+standalone GDK event (DevelopmentContext 3) contains the expected configured PFN
+and publisher ID. No new recorder, sign-in or live-service test was started.
+No repository `.gd` source changed, so the parse gate was not rerun. Integration
+also rebuilt both addons in Debug and Release and passed the existing native
+suite in each configuration (26 cases, 1816 assertions each), with telemetry
+suppressed. The full orchestrator was intentionally narrowed to the affected
+native targets; no live tests or live writes were run.
 
 | Command | Result |
 | --- | --- |

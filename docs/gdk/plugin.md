@@ -16,6 +16,11 @@ destination is configured. See the [schema, capture steps and pending production
 decisions](../../spec/initialization-telemetry.md).
 The event contains 18 application fields plus the standard
 `PartA_PrivTags` UInt64 usage classification; no new identity fields are added.
+Configured PFN/publisher metadata comes from the successful WithOptions
+initialization's selected config, or the physical `MicrosoftGame.config` beside
+an unpackaged development export. The packaging config-directory setting selects
+the source file before staging; exported games do not look back into that source
+directory.
 
 ### Implemented now
 

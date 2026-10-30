@@ -16,6 +16,11 @@ or cloud destination is configured. See the [schema, capture steps and pending
 production decisions](../../spec/initialization-telemetry.md).
 The event contains 18 application fields plus the standard
 `PartA_PrivTags` UInt64 usage classification; no new identity fields are added.
+Configured PFN/publisher metadata comes from the successful WithOptions
+initialization's selected config, or the physical `MicrosoftGame.config` beside
+an unpackaged development export. Packed resource-root resolution is not used to
+locate that physical file; missing config identity still leaves both metadata
+fields empty.
 
 ### Implemented now
 

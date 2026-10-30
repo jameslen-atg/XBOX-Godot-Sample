@@ -13,7 +13,6 @@
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/os.hpp>
-#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/xml_parser.hpp>
 #include <godot_cpp/core/error_macros.hpp>
 
@@ -42,15 +41,13 @@ void collect_configured_identity(const godot::String &p_selected_path, EventPayl
     using namespace godot;
     String path = p_selected_path;
     if (path.is_empty()) {
-        ProjectSettings *settings = ProjectSettings::get_singleton();
         OS *os = OS::get_singleton();
-        if (settings == nullptr || os == nullptr) {
+        if (os == nullptr || os->has_feature("editor")) {
             return;
         }
-        path = settings->globalize_path("res://MicrosoftGame.config");
-        if (path != os->get_executable_path().get_base_dir().path_join("MicrosoftGame.config")) {
-            return;
-        }
+        // Packed projects can globalize res:// to a relative path. The runtime
+        // uses the physical config beside the exported executable instead.
+        path = os->get_executable_path().get_base_dir().path_join("MicrosoftGame.config");
     }
     const std::wstring physical_path = wide(path);
     WIN32_FILE_ATTRIBUTE_DATA attributes{};
